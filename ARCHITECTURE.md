@@ -303,6 +303,13 @@ under the interactive user's state directory. `setup_status` compares those
 markers and exposes `conversationStale`; this is UI/reload bookkeeping, not an
 authentication mechanism.
 
+For backward compatibility the current marker remains a plain file. A bounded
+JSONL history is maintained alongside it. When an installation created by an
+older Go version has only the plain marker, the first history-aware access
+records that value as `legacy_plain`; subsequent connector-version transitions
+are appended atomically. Conversation state still records only the first
+observed schema marker, preserving stale-conversation detection semantics.
+
 Markdown chat and agent-ticket feature flags are schema-changing suffixes
 (`markdown-chat-v5`, `tickets-v1`) so an older connector/conversation can be
 prompted to reload when those tool contracts appear or disappear.
@@ -346,6 +353,21 @@ ticket after the call, preventing concurrent or replayed branches from executing
 the protected operation. A bounded offline threshold allows recovery only when
 no reservation is in flight.
 
+## ChatGPT MCP Apps and release pipeline
+
+Four self-contained MCP App resources are served without external network
+dependencies: workspace setup, diff, Markdown chat, and self-update status.
+Markdown chat tools point at the chat app when enabled. `self_update_status` is
+an app-only read-only tool; the widget can force a release check but cannot
+replace the host binary. Installation remains an explicit host CLI action.
+
+GitHub Actions tests native Windows/Linux/macOS runners and cross-builds the
+release target set with `CGO_ENABLED=0`. Stable tag releases package exact
+OS/architecture zip names and aggregate their SHA-256 values into
+`checksums.txt`, matching the self-update client's asset contract. The workflow
+is publishing infrastructure, not evidence of macOS/Linux runtime/service
+parity; those platforms require their own live lifecycle validation.
+
 ## Windows process and identity model
 
 Tunnel children are created with `CREATE_NO_WINDOW` and
@@ -387,10 +409,8 @@ account name or profile path.
 
 ### Remaining Codexify compatibility
 
-- richer ChatGPT-specific Markdown-chat/self-update widget parity;
-- migration of historical third-party connector schema state beyond the current
-  tunnel/conversation marker model;
-- release/CI publishing pipeline for the already-implemented self-update client.
+- pixel-level parity with upstream Rust's substantially larger ChatGPT widgets;
+- macOS Apple Silicon and Linux production runtime/service validation.
 
 ## Upstream reference
 

@@ -119,12 +119,11 @@ Implemented:
 
 Not implemented yet:
 
-- full upstream ChatGPT widget/UI parity for Markdown chat and self-update
-  confirmation cards (the server/tool/state contracts are implemented);
-- automatic migration of older third-party connector schema histories beyond
-  the current tunnel/conversation marker model;
-- release publishing/CI that produces the archive names and `checksums.txt`
-  consumed by `update apply` (the client-side updater is implemented).
+- pixel-level parity with the much larger upstream Rust ChatGPT widgets; the Go
+  implementation intentionally uses compact self-contained MCP Apps over the
+  same server contracts;
+- macOS/Linux runtime/service validation (release cross-builds exist, but those
+  platforms are the next dedicated production-parity stage).
 
 The MCP core has been exercised with both raw MCP requests and the official Go
 MCP client. End-to-end Windows SCM smoke tests verify the user-context lifecycle
@@ -324,7 +323,7 @@ workspace state. `show_diff` carries the diff-app/result metadata and remains
 usable as a normal MCP tool in clients that ignore MCP Apps metadata.
 
 `setup_status` also exposes a connector schema marker such as
-`0.7.0-dev+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
+`0.7.1-dev+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
 echo the marker it currently holds; the server records the first observed
 conversation marker privately and reports `conversationStale` when the active
 server schema has changed.
@@ -390,6 +389,31 @@ ticket, concurrent ownership, or a duplicated agent branch is rejected before
 the underlying tool executes. Persistent tickets use locked private files so
 the chain survives reconnects/processes; anonymous transport tickets stay
 memory-scoped.
+
+### Connector migration and release publishing
+
+Connector schema state keeps the plain compatibility marker used by older Go
+versions and now also maintains a bounded JSONL transition history. An existing
+plain marker is migrated lazily as `source=legacy_plain`; later runtime schema
+changes append transition records without changing the first-observed
+conversation-version rule.
+
+GitHub Actions includes a Windows/Linux/macOS test/cross-build matrix and a tag
+release workflow. Stable `vX.Y.Z` tags produce the exact archives consumed by
+the updater:
+
+```text
+codexify-go-vX.Y.Z-windows-amd64.zip
+codexify-go-vX.Y.Z-windows-arm64.zip
+codexify-go-vX.Y.Z-linux-amd64.zip
+codexify-go-vX.Y.Z-linux-arm64.zip
+codexify-go-vX.Y.Z-darwin-amd64.zip
+codexify-go-vX.Y.Z-darwin-arm64.zip
+checksums.txt
+```
+
+The release contract is regression-tested against the self-updater. Successful
+cross-compilation is not treated as runtime validation for macOS/Linux.
 
 Validate configuration without starting the tunnel:
 
