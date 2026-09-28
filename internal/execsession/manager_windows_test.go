@@ -12,7 +12,8 @@ func TestQuickCommand(t *testing.T) {
 	m := NewManager()
 	defer m.Close()
 	res, err := m.Start(StartInput{
-		Command: "Write-Output 'hello'",
+		Command: "echo hello",
+		Shell:   "cmd",
 		Yield:   2 * time.Second,
 	})
 	if err != nil {
@@ -33,7 +34,8 @@ func TestLongCommandReturnsSessionAndPolls(t *testing.T) {
 	m := NewManager()
 	defer m.Close()
 	res, err := m.Start(StartInput{
-		Command: "Write-Output 'start'; Start-Sleep -Milliseconds 500; Write-Output 'done'",
+		Command: "echo start & ping -n 2 127.0.0.1 >nul & echo done",
+		Shell:   "cmd",
 		Yield:   50 * time.Millisecond,
 	})
 	if err != nil {
@@ -42,17 +44,20 @@ func TestLongCommandReturnsSessionAndPolls(t *testing.T) {
 	if !res.Running || res.SessionID == "" {
 		t.Fatalf("expected running session: %+v", res)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	var output strings.Builder
+	output.WriteString(res.Output)
+	deadline := time.Now().Add(5 * time.Second)
 	for res.Running && time.Now().Before(deadline) {
 		res, err = m.Write(res.SessionID, "", 100*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
+		output.WriteString(res.Output)
 	}
 	if res.Running {
 		t.Fatal("expected session to finish")
 	}
-	if !strings.Contains(res.Output, "done") {
-		t.Fatalf("output = %q", res.Output)
+	if !strings.Contains(output.String(), "done") {
+		t.Fatalf("output = %q", output.String())
 	}
 }

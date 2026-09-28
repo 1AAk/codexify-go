@@ -19,7 +19,7 @@ import (
 
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/projects"
-	"github.com/benice2me11/codexify-go/internal/workspace"
+	workspacepkg "github.com/benice2me11/codexify-go/internal/workspace"
 )
 
 const (
@@ -40,6 +40,7 @@ type Store struct {
 }
 
 type channel struct {
+	root       string
 	path       string
 	cursorPath string
 	persistent bool
@@ -78,7 +79,7 @@ func (s *Store) Path(workspace string, identity *projects.Identity) (string, err
 	if strings.TrimSpace(workspace) == "" {
 		return "", errors.New("Markdown chat requires an active workspace")
 	}
-	base, err := filepath.Abs(s.cfg.Dir)
+	base, err := workspacepkg.Canonical(s.cfg.Dir)
 	if err != nil {
 		return "", err
 	}
@@ -272,7 +273,11 @@ func (s *Store) get(workspace string, identity *projects.Identity) (*channel, er
 	if existing := s.channels[path]; existing != nil {
 		return existing, nil
 	}
-	ch := &channel{path: path, persistent: identity.Persistent}
+	base, err := workspacepkg.Canonical(s.cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	ch := &channel{root: base, path: path, persistent: identity.Persistent}
 	if identity.Persistent {
 		ch.cursorPath = filepath.Join(filepath.Dir(path), "cursor.json")
 	}
@@ -281,7 +286,7 @@ func (s *Store) get(workspace string, identity *projects.Identity) (*channel, er
 }
 
 func (c *channel) ensureLocked() error {
-	if err := privateDir(filepath.Dir(c.path)); err != nil {
+	if err := privateDir(c.root, filepath.Dir(c.path)); err != nil {
 		return err
 	}
 	info, err := os.Lstat(c.path)
@@ -419,7 +424,7 @@ func (c *channel) advanceLocked(end int64) error {
 		if err != nil {
 			return err
 		}
-		if err := atomicWrite(c.cursorPath, data, 0o600); err != nil {
+		if err := atomicWrite(c.root, c.cursorPath, data, 0o600); err != nil {
 			return err
 		}
 	}
@@ -494,28 +499,81 @@ func baseResult(status, content, path, next string) Result {
 	}
 }
 
-func privateDir(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
+func privateDir(root, path string) error {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("Markdown chat directory escapes the configured private root")
+	}
+
+	if err := ensureRealDir(root); err != nil {
 		return err
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
+	if rel == "." {
+		return nil
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("Markdown chat directory must be a real directory, not a symlink")
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		switch {
+		case errors.Is(statErr, os.ErrNotExist):
+			if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			info, statErr = os.Lstat(current)
+			if statErr != nil {
+				return statErr
+			}
+		case statErr != nil:
+			return statErr
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("Markdown chat directory tree contains a symlink or non-directory component")
+		}
 	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
+	return nil
+}
+
+func ensureRealDir(path string) error {
+	path = filepath.Clean(path)
+	var missing []string
+	cursor := path
+	for {
+		info, err := os.Lstat(cursor)
+		if err == nil {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("Markdown chat private root contains a symlink or non-directory component")
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		parent := filepath.Dir(cursor)
+		if parent == cursor {
+			return errors.New("cannot find an existing parent for Markdown chat private root")
+		}
+		missing = append(missing, filepath.Base(cursor))
+		cursor = parent
 	}
-	resolved, err := workspace.Canonical(abs)
-	if err != nil {
-		return err
+	for i := len(missing) - 1; i >= 0; i-- {
+		cursor = filepath.Join(cursor, missing[i])
+		if err := os.Mkdir(cursor, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err := os.Lstat(cursor)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("Markdown chat private root contains a symlink or non-directory component")
+		}
 	}
-	// Canonical OS aliases such as macOS /var -> /private/var are accepted.
-	// The directory itself is still rejected above when it is a symlink.
-	_ = resolved
 	return nil
 }
 
@@ -549,8 +607,8 @@ func readRange(file *os.File, start, end int64, limit int) ([]byte, error) {
 	return data, nil
 }
 
-func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	if err := privateDir(filepath.Dir(path)); err != nil {
+func atomicWrite(root, path string, data []byte, mode os.FileMode) error {
+	if err := privateDir(root, filepath.Dir(path)); err != nil {
 		return err
 	}
 	file, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")

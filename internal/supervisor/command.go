@@ -72,7 +72,15 @@ func (p *commandProcess) Stop(ctx context.Context) error {
 	}
 	select {
 	case <-p.done:
-		return nil
+		if err := waitProcessTreeExit(ctx, p.PID()); err == nil {
+			return nil
+		} else {
+			_ = forceKillProcessTree(p.PID())
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
 	case <-ctx.Done():
 		_ = forceKillProcessTree(p.PID())
 		select {

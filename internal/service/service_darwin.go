@@ -143,7 +143,9 @@ func Restart(name string) error {
 }
 
 func Remove(name string) error {
-	_ = Stop(name)
+	if err := Stop(name); err != nil {
+		return fmt.Errorf("stop service before removal: %w", err)
+	}
 	label := launchdLabel(name)
 	plistPath, err := plistPath(label)
 	if err != nil {

@@ -28,3 +28,5 @@ func forceKillProcessTree(pid int) error {
 	configureProcess(cmd)
 	return cmd.Run()
 }
+
+func waitProcessTreeExit(context.Context, int) error { return nil }

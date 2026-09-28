@@ -152,6 +152,51 @@ func TestTransientIdentityDoesNotPersistCursor(t *testing.T) {
 	}
 }
 
+func TestConfiguredRootThroughParentSymlinkCanonicalizesSafely(t *testing.T) {
+	realParent := t.TempDir()
+	aliasParent := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	configured := filepath.Join(aliasParent, "chat-state")
+	store := New(config.AgentChatConfig{Enabled: true, Dir: configured, MaxWaitMS: 1000})
+	identity := &projects.Identity{Key: strings.Repeat("e", 64), Scope: "chatgpt_conversation", Persistent: true}
+	path, err := store.Ensure(t.TempDir(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realConfigured, err := filepath.EvalSymlinks(filepath.Join(realParent, "chat-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(realConfigured, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("chat path escaped canonical configured root: root=%q path=%q rel=%q err=%v", realConfigured, path, rel, err)
+	}
+}
+
+func TestRejectsSymlinkInsidePrivateRoot(t *testing.T) {
+	root := t.TempDir()
+	escape := t.TempDir()
+	store := New(config.AgentChatConfig{Enabled: true, Dir: root, MaxWaitMS: 1000})
+	identity := &projects.Identity{Key: strings.Repeat("f", 64), Scope: "chatgpt_conversation", Persistent: true}
+	workspace := t.TempDir()
+	path, err := store.Path(workspace, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceDir := filepath.Dir(filepath.Dir(path))
+	if err := os.Symlink(escape, workspaceDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := store.Ensure(workspace, identity); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected private-root symlink rejection, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(escape, identity.Key, "CHAT.md")); !os.IsNotExist(err) {
+		t.Fatalf("chat write escaped through symlink, err=%v", err)
+	}
+}
+
 func appendFile(path, content string) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
