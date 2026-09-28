@@ -3,11 +3,13 @@ package connectorschema
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/benice2me11/codexify-go/internal/buildinfo"
 	"github.com/benice2me11/codexify-go/internal/config"
@@ -18,6 +20,12 @@ const BaseVersion = buildinfo.Version
 type Store struct {
 	dir string
 	mu  sync.Mutex
+}
+
+type HistoryEntry struct {
+	Version    string `json:"version"`
+	ObservedAt string `json:"observedAt"`
+	Source     string `json:"source"`
 }
 
 func Version(cfg config.Config) string {
@@ -60,7 +68,9 @@ func NewForTunnel(tunnelID string) (*Store, error) {
 }
 
 func (s *Store) RecordConnector(version string) error {
-	return s.write("connector", version)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeWithHistoryUnlocked("connector", version, "runtime", false)
 }
 
 func (s *Store) ConnectorVersion() string {
@@ -82,9 +92,20 @@ func (s *Store) RememberConversationVersion(identityHash, version string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing := s.readUnlocked(key); existing != "" {
+		_ = s.ensureLegacyHistoryUnlocked(key, existing)
 		return nil
 	}
-	return s.writeUnlocked(key, version)
+	return s.writeWithHistoryUnlocked(key, version, "conversation", true)
+}
+
+func (s *Store) History(key string) []HistoryEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.readUnlocked(key)
+	if current != "" {
+		_ = s.ensureLegacyHistoryUnlocked(key, current)
+	}
+	return s.readHistoryUnlocked(key)
 }
 
 func (s *Store) write(key, version string) error {
@@ -106,6 +127,91 @@ func (s *Store) writeUnlocked(key, version string) error {
 	}
 	target := filepath.Join(s.dir, key)
 	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) writeWithHistoryUnlocked(key, version, source string, firstOnly bool) error {
+	version = strings.TrimSpace(version)
+	if version == "" || len(version) > 64 {
+		return errors.New("connector schema version is empty or too long")
+	}
+	existing := s.readUnlocked(key)
+	if existing != "" {
+		if err := s.ensureLegacyHistoryUnlocked(key, existing); err != nil {
+			return err
+		}
+		if firstOnly || existing == version {
+			return nil
+		}
+	}
+	if err := s.writeUnlocked(key, version); err != nil {
+		return err
+	}
+	return s.appendHistoryUnlocked(key, HistoryEntry{Version: version, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Source: source})
+}
+
+func (s *Store) ensureLegacyHistoryUnlocked(key, version string) error {
+	if len(s.readHistoryUnlocked(key)) > 0 {
+		return nil
+	}
+	return s.appendHistoryUnlocked(key, HistoryEntry{Version: version, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Source: "legacy_plain"})
+}
+
+func (s *Store) historyPath(key string) string {
+	return filepath.Join(s.dir, key+".history.jsonl")
+}
+
+func (s *Store) readHistoryUnlocked(key string) []HistoryEntry {
+	data, err := os.ReadFile(s.historyPath(key))
+	if err != nil {
+		return nil
+	}
+	var entries []HistoryEntry
+	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry HistoryEntry
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Version != "" {
+			entries = append(entries, entry)
+		}
+	}
+	if len(entries) > 256 {
+		entries = entries[len(entries)-256:]
+	}
+	return entries
+}
+
+func (s *Store) appendHistoryUnlocked(key string, entry HistoryEntry) error {
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		return err
+	}
+	entries := s.readHistoryUnlocked(key)
+	if len(entries) > 0 && entries[len(entries)-1].Version == entry.Version {
+		return nil
+	}
+	entries = append(entries, entry)
+	if len(entries) > 256 {
+		entries = entries[len(entries)-256:]
+	}
+	var b strings.Builder
+	for _, item := range entries {
+		line, err := json.Marshal(item)
+		if err != nil {
+			return err
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	path := s.historyPath(key)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}

@@ -3,10 +3,34 @@ package selfupdate
 import (
 	"archive/zip"
 	"bytes"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestReleaseWorkflowMatchesUpdaterAssetContract(t *testing.T) {
+	path := filepath.Join("..", "..", ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"codexify-go-v${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip",
+		"checksums.txt",
+		"goos: windows",
+		"goos: linux",
+		"goos: darwin",
+		"goarch: amd64",
+		"goarch: arm64",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("release workflow missing %q", want)
+		}
+	}
+}
 
 func TestNormalizedVersion(t *testing.T) {
 	for _, input := range []string{"0.7.0", "v0.7.0", "0.7.0-dev"} {

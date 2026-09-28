@@ -59,3 +59,41 @@ func TestStorePersistsConnectorAndFirstConversationVersion(t *testing.T) {
 		t.Fatal("connector record is directory")
 	}
 }
+
+func TestConnectorHistoryMigratesLegacyPlainStateAndRecordsTransitions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "connector"), []byte("0.6.0-dev"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{dir: dir}
+	if err := store.RecordConnector("0.7.0-dev"); err != nil {
+		t.Fatal(err)
+	}
+	history := store.History("connector")
+	if len(history) != 2 {
+		t.Fatalf("history=%#v", history)
+	}
+	if history[0].Version != "0.6.0-dev" || history[0].Source != "legacy_plain" {
+		t.Fatalf("legacy entry=%#v", history[0])
+	}
+	if history[1].Version != "0.7.0-dev" || history[1].Source != "runtime" {
+		t.Fatalf("runtime entry=%#v", history[1])
+	}
+	if got := store.ConnectorVersion(); got != "0.7.0-dev" {
+		t.Fatalf("connector=%q", got)
+	}
+}
+
+func TestConversationHistoryPreservesFirstObservedVersion(t *testing.T) {
+	store := &Store{dir: t.TempDir()}
+	if err := store.RememberConversationVersion("abc", "0.6.0-dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RememberConversationVersion("abc", "0.7.0-dev"); err != nil {
+		t.Fatal(err)
+	}
+	history := store.History("conversation-abc")
+	if len(history) != 1 || history[0].Version != "0.6.0-dev" {
+		t.Fatalf("history=%#v", history)
+	}
+}

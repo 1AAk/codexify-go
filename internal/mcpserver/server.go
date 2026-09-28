@@ -375,7 +375,8 @@ func (r *Runtime) registerTools() {
 	})
 
 	if r.chat.Enabled() {
-		chatMeta := mcp.Meta{"ui": map[string]any{"visibility": []string{"model"}}}
+		chatMeta := ui.ChatToolMeta()
+		chatMeta["io.github.devnoname120/codexify/markdown-chat-enabled"] = true
 		mcp.AddTool(r.server, &mcp.Tool{
 			Meta:        chatMeta,
 			Name:        "chat_read",
@@ -427,6 +428,14 @@ func (r *Runtime) registerTools() {
 			return nil, out, err
 		})
 	}
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Meta:        ui.UpdateToolMeta(),
+		Name:        "self_update_status",
+		Description: "Read-only self-update status for the update app. Set force=true to bypass the short release-check cache. This tool never installs an update.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SelfUpdateStatusInput) (*mcp.CallToolResult, selfupdate.Inspection, error) {
+		return nil, selfupdate.Inspect(ctx, buildinfo.Version, in.Force), nil
+	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "get_project_doc",
@@ -846,6 +855,8 @@ func (r *Runtime) registerUIResources() {
 	}{
 		{ui.SetupURI, "codexify-go-setup", "Codexify Go workspace setup", "Workspace selection and status app.", ui.SetupHTML},
 		{ui.DiffURI, "codexify-go-diff", "Codexify Go diff", "Compact working-tree diff viewer.", ui.DiffHTML},
+		{ui.ChatURI, "codexify-go-markdown-chat", "Codexify Go Markdown chat", "Conversation-specific CHAT.md reader and composer.", ui.ChatHTML},
+		{ui.UpdateURI, "codexify-go-self-update", "Codexify Go update status", "Read-only release/update status app.", ui.UpdateHTML},
 	}
 	for _, item := range resources {
 		item := item
@@ -875,6 +886,10 @@ type EmptyInput struct{}
 
 type ChatWriteInput struct {
 	Message string `json:"message" jsonschema:"complete Markdown message to append to this conversation's CHAT.md"`
+}
+
+type SelfUpdateStatusInput struct {
+	Force bool `json:"force,omitempty" jsonschema:"bypass the short GitHub release-check cache"`
 }
 
 type ListProjectsInput struct {
@@ -1219,7 +1234,7 @@ func (r *Runtime) agentBrief(req *mcp.CallToolRequest) (string, error) {
 func builtInToolNames() map[string]struct{} {
 	names := []string{
 		"get_agent_brief", "get_project_doc",
-		"chat_read", "chat_write", "chat_await",
+		"chat_read", "chat_write", "chat_await", "self_update_status",
 		"list_projects", "set_project_root", "setup_ui_switch_project", "setup_status", "list_worktrees", "get_environment",
 		"recall", "remember", "update_memory_note", "forget_memory_note", "skills_list", "skills_read",
 		"export_host_file", "import_host_file",

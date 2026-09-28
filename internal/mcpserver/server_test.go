@@ -390,6 +390,9 @@ func TestUIResourcesAndToolMetadata(t *testing.T) {
 	if got := metaByName["show_diff"]["ui/resourceUri"]; got != ui.DiffURI {
 		t.Fatalf("show_diff UI resource = %#v", got)
 	}
+	if got := metaByName["self_update_status"]["ui/resourceUri"]; got != ui.UpdateURI {
+		t.Fatalf("self_update_status UI resource = %#v", got)
+	}
 
 	setup, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: ui.SetupURI})
 	if err != nil {
@@ -404,6 +407,20 @@ func TestUIResourcesAndToolMetadata(t *testing.T) {
 	}
 	if len(diff.Contents) != 1 || !strings.Contains(diff.Contents[0].Text, "toolOutput") {
 		t.Fatalf("unexpected diff UI resource: %+v", diff.Contents)
+	}
+	chat, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: ui.ChatURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Contents) != 1 || !strings.Contains(chat.Contents[0].Text, "chat_write") {
+		t.Fatalf("unexpected chat UI resource: %+v", chat.Contents)
+	}
+	update, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: ui.UpdateURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(update.Contents) != 1 || !strings.Contains(update.Contents[0].Text, "self_update_status") || strings.Contains(update.Contents[0].Text, "fetch(") {
+		t.Fatalf("unexpected update UI resource: %+v", update.Contents)
 	}
 }
 
@@ -649,6 +666,19 @@ func TestMarkdownChatOverMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatMetaOK := false
+	for _, tool := range listed.Tools {
+		if tool.Name == "chat_read" && tool.Meta["ui/resourceUri"] == ui.ChatURI {
+			chatMetaOK = true
+		}
+	}
+	if !chatMetaOK {
+		t.Fatal("chat_read does not advertise the Markdown chat MCP App")
+	}
 
 	meta := mcp.Meta{"openai/session": "markdown-chat-conversation"}
 	selected, err := session.CallTool(context.Background(), &mcp.CallToolParams{

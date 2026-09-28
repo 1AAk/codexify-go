@@ -3,9 +3,11 @@ package ui
 import "github.com/modelcontextprotocol/go-sdk/mcp"
 
 const (
-	SetupURI = "ui://codexify-go/setup/v1/mcp-app.html"
-	DiffURI  = "ui://codexify-go/diff/v1/mcp-app.html"
-	MIMEType = "text/html;profile=mcp-app"
+	SetupURI  = "ui://codexify-go/setup/v1/mcp-app.html"
+	DiffURI   = "ui://codexify-go/diff/v1/mcp-app.html"
+	ChatURI   = "ui://codexify-go/markdown-chat/v1/mcp-app.html"
+	UpdateURI = "ui://codexify-go/self-update/v1/mcp-app.html"
+	MIMEType  = "text/html;profile=mcp-app"
 )
 
 func SetupToolMeta() mcp.Meta {
@@ -37,6 +39,23 @@ func DiffToolMeta() mcp.Meta {
 			"visibility":  []string{"model"},
 		},
 		"ui/resourceUri": DiffURI,
+	}
+}
+
+func ChatToolMeta() mcp.Meta {
+	return toolMeta(ChatURI, []string{"model", "app"})
+}
+
+func UpdateToolMeta() mcp.Meta {
+	return toolMeta(UpdateURI, []string{"app"})
+}
+
+func toolMeta(uri string, visibility []string) mcp.Meta {
+	return mcp.Meta{
+		"ui":                      map[string]any{"resourceUri": uri, "visibility": visibility},
+		"ui/resourceUri":          uri,
+		"openai/outputTemplate":   uri,
+		"openai/widgetAccessible": true,
 	}
 }
 
@@ -129,3 +148,25 @@ function render(){
 window.addEventListener("openai:set_globals",render);render();
 </script></body>
 </html>`
+
+const ChatHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{font-family:system-ui,sans-serif;color-scheme:light dark}body{margin:0;padding:10px}.card{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:12px;padding:10px}.row{display:flex;gap:8px}textarea{box-sizing:border-box;width:100%;min-height:76px;margin-top:8px;font:inherit}button{font:inherit;padding:7px 10px}.messages{white-space:pre-wrap;max-height:260px;overflow:auto}.muted{opacity:.65;font-size:.9em}#error{color:#c44}</style></head>
+<body><div class="card"><div class="row"><strong>Codexify chat</strong><button id="refresh">Refresh</button></div><div id="messages" class="messages muted">No unread user text.</div><textarea id="message" placeholder="Message to append to CHAT.md"></textarea><div class="row"><button id="send">Send</button><span id="status" class="muted"></span></div><div id="error"></div></div>
+<script>
+const messages=document.getElementById("messages"),message=document.getElementById("message"),status=document.getElementById("status"),error=document.getElementById("error");
+function structured(r){return r&&((r.structuredContent)||(r.structured_content)||(r.result&&r.result.structuredContent))||{}}
+async function call(name,args={}){if(!(window.openai&&window.openai.callTool))throw new Error("Tool calls are unavailable in this host");return window.openai.callTool(name,args)}
+async function refresh(){error.textContent="";try{const r=structured(await call("chat_read",{}));messages.textContent=r.user_text||r.userText||"No unread user text.";status.textContent=r.state||""}catch(e){error.textContent=String(e)}}
+document.getElementById("refresh").onclick=refresh;document.getElementById("send").onclick=async()=>{const value=message.value.trim();if(!value)return;error.textContent="";try{await call("chat_write",{message:value});message.value="";status.textContent="Sent"}catch(e){error.textContent=String(e)}};
+window.addEventListener("openai:set_globals",refresh);refresh();
+</script></body></html>`
+
+const UpdateHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{font-family:system-ui,sans-serif;color-scheme:light dark}body{margin:0;padding:10px}.card{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:12px;padding:12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}button{font:inherit;padding:7px 10px}.muted{opacity:.65}code{font-family:ui-monospace,monospace}#error{color:#c44}</style></head>
+<body><div class="card"><div class="row"><strong>Codexify Go update</strong><button id="check">Check again</button></div><p id="status" class="muted">Checking…</p><p id="detail"></p><p class="muted">Installation is intentionally explicit. When an update is available, run <code>codexify-go update apply --config &lt;config&gt;</code> on the host.</p><div id="error"></div></div>
+<script>
+const status=document.getElementById("status"),detail=document.getElementById("detail"),error=document.getElementById("error");function structured(r){return r&&((r.structuredContent)||(r.structured_content)||(r.result&&r.result.structuredContent))||{}}async function call(name,args={}){if(!(window.openai&&window.openai.callTool))throw new Error("Tool calls are unavailable in this host");return window.openai.callTool(name,args)}
+async function check(force=false){error.textContent="";try{const p=structured(await call("self_update_status",{force}));status.textContent=(p.status||"unknown")+" — current "+(p.currentVersion||"?")+(p.latestVersion?", latest "+p.latestVersion:"");detail.textContent=p.detail||""}catch(e){error.textContent=String(e)}}document.getElementById("check").onclick=()=>check(true);window.addEventListener("openai:set_globals",()=>check(false));check(false);
+</script></body></html>`
