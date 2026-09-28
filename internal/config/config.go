@@ -51,9 +51,40 @@ type ServiceConfig struct {
 }
 
 type MCPConfig struct {
-	WorkspaceRoot       string `json:"workspaceRoot"`
-	AuthEnabled         bool   `json:"authEnabled"`
-	MaxRequestBodyBytes int64  `json:"maxRequestBodyBytes"`
+	WorkspaceRoot       string              `json:"workspaceRoot"`
+	AuthEnabled         bool                `json:"authEnabled"`
+	MaxRequestBodyBytes int64               `json:"maxRequestBodyBytes"`
+	MultiProject        bool                `json:"multiProject"`
+	BindingsDir         string              `json:"bindingsDir,omitempty"`
+	ProjectScanDepth    int                 `json:"projectScanDepth,omitempty"`
+	Worktrees           WorktreeConfig      `json:"worktrees"`
+	Projects            []ProjectSpec       `json:"projects,omitempty"`
+	Upstreams           []UpstreamMCPConfig `json:"upstreams,omitempty"`
+}
+
+type WorktreeConfig struct {
+	Mode string `json:"mode"`
+	Root string `json:"root,omitempty"`
+}
+
+type ProjectSpec struct {
+	Path        string `json:"path"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type UpstreamMCPConfig struct {
+	Name      string            `json:"name"`
+	Transport string            `json:"transport,omitempty"`
+	Mode      string            `json:"mode,omitempty"`
+	Command   string            `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Workdir   string            `json:"workdir,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Required  bool              `json:"required,omitempty"`
+	Timeout   Duration          `json:"timeout,omitempty"`
 }
 
 type TunnelConfig struct {
@@ -94,6 +125,10 @@ func Default() Config {
 			WorkspaceRoot:       ".",
 			AuthEnabled:         true,
 			MaxRequestBodyBytes: 4 << 20,
+			ProjectScanDepth:    2,
+			Worktrees: WorktreeConfig{
+				Mode: "auto",
+			},
 		},
 		Tunnel: TunnelConfig{
 			StartupWaitTimeout: Duration(15 * time.Second),
@@ -142,6 +177,36 @@ func (c *Config) expand(base string) {
 	}
 	c.Log.File = expand(c.Log.File)
 	c.MCP.WorkspaceRoot = expand(c.MCP.WorkspaceRoot)
+	if c.MCP.BindingsDir == "" {
+		c.MCP.BindingsDir = filepath.Join(c.MCP.WorkspaceRoot, ".codexify-go", "bindings")
+	} else {
+		c.MCP.BindingsDir = expand(c.MCP.BindingsDir)
+	}
+	if c.MCP.Worktrees.Root == "" {
+		c.MCP.Worktrees.Root = filepath.Join(c.MCP.WorkspaceRoot, ".codexify-go", "worktrees")
+	} else {
+		c.MCP.Worktrees.Root = expand(c.MCP.Worktrees.Root)
+	}
+	for i := range c.MCP.Projects {
+		c.MCP.Projects[i].Path = expand(c.MCP.Projects[i].Path)
+	}
+	for i := range c.MCP.Upstreams {
+		u := &c.MCP.Upstreams[i]
+		u.Command = os.ExpandEnv(u.Command)
+		if u.Workdir != "" {
+			u.Workdir = expand(u.Workdir)
+		}
+		u.URL = os.ExpandEnv(u.URL)
+		for j, arg := range u.Args {
+			u.Args[j] = os.ExpandEnv(arg)
+		}
+		for k, v := range u.Env {
+			u.Env[k] = os.ExpandEnv(v)
+		}
+		for k, v := range u.Headers {
+			u.Headers[k] = os.ExpandEnv(v)
+		}
+	}
 	c.Tunnel.Executable = expand(c.Tunnel.Executable)
 	c.Tunnel.HealthURLFile = expand(c.Tunnel.HealthURLFile)
 	c.Tunnel.APIKeyRef = expandReference(c.Tunnel.APIKeyRef, base)
@@ -180,6 +245,53 @@ func (c Config) Validate() error {
 	}
 	if c.MCP.MaxRequestBodyBytes <= 0 {
 		errs = append(errs, errors.New("mcp.maxRequestBodyBytes must be > 0"))
+	}
+	if c.MCP.ProjectScanDepth < 0 || c.MCP.ProjectScanDepth > 8 {
+		errs = append(errs, errors.New("mcp.projectScanDepth must be between 0 and 8"))
+	}
+	switch strings.ToLower(c.MCP.Worktrees.Mode) {
+	case "auto", "always", "never":
+	default:
+		errs = append(errs, errors.New("mcp.worktrees.mode must be auto, always, or never"))
+	}
+	seenUpstreams := map[string]struct{}{}
+	for i, upstream := range c.MCP.Upstreams {
+		name := strings.TrimSpace(upstream.Name)
+		if name == "" {
+			errs = append(errs, fmt.Errorf("mcp.upstreams[%d].name is required", i))
+			continue
+		}
+		if _, exists := seenUpstreams[name]; exists {
+			errs = append(errs, fmt.Errorf("duplicate MCP upstream name %q", name))
+		}
+		seenUpstreams[name] = struct{}{}
+		transport := strings.ToLower(strings.TrimSpace(upstream.Transport))
+		if transport == "" {
+			if upstream.URL != "" {
+				transport = "streamable_http"
+			} else {
+				transport = "stdio"
+			}
+		}
+		switch transport {
+		case "stdio":
+			if strings.TrimSpace(upstream.Command) == "" {
+				errs = append(errs, fmt.Errorf("MCP upstream %q stdio transport requires command", name))
+			}
+		case "streamable_http", "streamable-http", "http":
+			if strings.TrimSpace(upstream.URL) == "" {
+				errs = append(errs, fmt.Errorf("MCP upstream %q HTTP transport requires url", name))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("MCP upstream %q has unsupported transport %q", name, transport))
+		}
+		mode := strings.ToLower(strings.TrimSpace(upstream.Mode))
+		if mode == "" {
+			mode = "catalog"
+		}
+		if mode != "catalog" && mode != "direct" {
+			errs = append(errs, fmt.Errorf("MCP upstream %q mode must be catalog or direct", name))
+		}
 	}
 	if strings.TrimSpace(c.Tunnel.Executable) == "" {
 		errs = append(errs, errors.New("tunnel.executable is required"))

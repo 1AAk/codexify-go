@@ -12,7 +12,14 @@
   "mcp": {
     "workspaceRoot": "${USERPROFILE}\\codexify-go-workspace",
     "authEnabled": true,
-    "maxRequestBodyBytes": 4194304
+    "maxRequestBodyBytes": 4194304,
+    "multiProject": false,
+    "projectScanDepth": 2,
+    "worktrees": {
+      "mode": "auto"
+    },
+    "projects": [],
+    "upstreams": []
   },
   "tunnel": {
     "executable": "${USERPROFILE}\\.codexify\\openai-tunnel\\v0.0.12\\tunnel-client-runtime.exe",

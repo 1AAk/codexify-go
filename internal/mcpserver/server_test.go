@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/benice2me11/codexify-go/internal/config"
@@ -153,6 +155,100 @@ func TestOfficialClientNegotiatesCurrentProtocol(t *testing.T) {
 	}
 	if string(data) != "sdk works\n" {
 		t.Fatalf("written data=%q", data)
+	}
+}
+
+func TestMultiProjectConversationBindingOverMCP(t *testing.T) {
+	accessRoot := t.TempDir()
+	projectRoot := filepath.Join(accessRoot, "project-a")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "go.mod"), []byte("module example/project-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "hello.txt"), []byte("bound workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.MCP.WorkspaceRoot = accessRoot
+	cfg.MCP.MultiProject = true
+	cfg.MCP.ProjectScanDepth = 2
+	cfg.MCP.BindingsDir = filepath.Join(accessRoot, ".state", "bindings")
+	cfg.MCP.Worktrees = config.WorktreeConfig{Mode: "never", Root: filepath.Join(accessRoot, ".state", "worktrees")}
+	cfg.Tunnel.MCPServerURL = "http://127.0.0.1:0/mcp"
+	cfg.Tunnel.Executable = filepath.Join(t.TempDir(), "unused.exe")
+	cfg.Tunnel.TunnelID = "tunnel_test"
+	cfg.Tunnel.APIKeyRef = "env:TEST"
+	cfg.MCP.AuthEnabled = false
+
+	r, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.listener.Close()
+		r.exec.Close()
+		if r.bridge != nil {
+			r.bridge.Close()
+		}
+	})
+	httpServer := httptest.NewServer(r.Handler())
+	defer httpServer.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "binding-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL + "/mcp",
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	listed, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_projects",
+		Arguments: map[string]any{"query": "project-a"},
+	})
+	if err != nil || listed.IsError {
+		t.Fatalf("list_projects failed: err=%v result=%+v", err, listed)
+	}
+
+	metaA := mcp.Meta{"openai/session": "conversation-a"}
+	selected, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Meta:      metaA,
+		Name:      "set_project_root",
+		Arguments: map[string]any{"path": "project-a", "createWorktree": false},
+	})
+	if err != nil || selected.IsError {
+		t.Fatalf("set_project_root failed: err=%v result=%+v", err, selected)
+	}
+
+	read, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Meta:      metaA,
+		Name:      "read_file",
+		Arguments: map[string]any{"path": "hello.txt"},
+	})
+	if err != nil || read.IsError {
+		t.Fatalf("bound read_file failed: err=%v result=%+v", err, read)
+	}
+	if !strings.Contains(fmt.Sprint(read.StructuredContent), "bound workspace") {
+		t.Fatalf("unexpected read result: %#v", read.StructuredContent)
+	}
+
+	metaB := mcp.Meta{"openai/session": "conversation-b"}
+	unbound, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Meta:      metaB,
+		Name:      "read_file",
+		Arguments: map[string]any{"path": "hello.txt"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !unbound.IsError {
+		t.Fatalf("unbound conversation unexpectedly inherited binding: %+v", unbound)
 	}
 }
 

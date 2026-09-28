@@ -20,6 +20,8 @@ import (
 	"github.com/benice2me11/codexify-go/internal/agenttools"
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/execsession"
+	"github.com/benice2me11/codexify-go/internal/projects"
+	"github.com/benice2me11/codexify-go/internal/upstream"
 	"github.com/benice2me11/codexify-go/internal/workspace"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -29,6 +31,8 @@ const InternalAuthEnv = "CODEXIFY_GO_INTERNAL_MCP_AUTHORIZATION"
 type Runtime struct {
 	cfg      config.Config
 	root     *workspace.Root
+	projects *projects.Manager
+	bridge   *upstream.Bridge
 	exec     *execsession.Manager
 	server   *mcp.Server
 	http     *http.Server
@@ -42,10 +46,11 @@ func New(cfg config.Config, logger *slog.Logger) (*Runtime, error) {
 }
 
 func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtime, error) {
-	root, err := workspace.New(cfg.MCP.WorkspaceRoot)
+	projectManager, err := projects.New(cfg.MCP)
 	if err != nil {
 		return nil, err
 	}
+	root := projectManager.AccessRoot()
 	endpoint, listen, err := endpointFromURL(cfg.Tunnel.MCPServerURL)
 	if err != nil {
 		return nil, err
@@ -71,6 +76,7 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 	r := &Runtime{
 		cfg:      cfg,
 		root:     root,
+		projects: projectManager,
 		exec:     execsession.NewManager(),
 		listener: ln,
 		token:    token,
@@ -78,9 +84,16 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 	}
 	r.server = mcp.NewServer(&mcp.Implementation{
 		Name:    "codexify-go",
-		Version: "0.3.0-dev",
+		Version: "0.4.0-dev",
 	}, &mcp.ServerOptions{Logger: logger})
 	r.registerTools()
+	bridge, err := upstream.ConnectAndRegister(context.Background(), cfg.MCP.Upstreams, r.server, logger, builtInToolNames())
+	if err != nil {
+		ln.Close()
+		r.exec.Close()
+		return nil, fmt.Errorf("connect upstream MCP servers: %w", err)
+	}
+	r.bridge = bridge
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return r.server
@@ -116,8 +129,12 @@ func (r *Runtime) Serve() error {
 }
 
 func (r *Runtime) Shutdown(ctx context.Context) error {
+	err := r.http.Shutdown(ctx)
 	r.exec.Close()
-	return r.http.Shutdown(ctx)
+	if r.bridge != nil {
+		r.bridge.Close()
+	}
+	return err
 }
 
 func (r *Runtime) TunnelEnvironment() (string, map[string]string) {
@@ -143,13 +160,38 @@ func (r *Runtime) Handler() http.Handler {
 }
 
 func (r *Runtime) registerTools() {
-	files := &agenttools.Files{Root: r.root}
-	git := &agenttools.Git{Root: r.root}
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "list_projects",
+		Description: "List selectable projects below the configured access root before binding this ChatGPT conversation.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in ListProjectsInput) (*mcp.CallToolResult, projects.ListOutput, error) {
+		out, err := r.projects.List(in.Query, in.Limit)
+		return nil, out, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "set_project_root",
+		Description: "Bind this ChatGPT conversation to one existing project below the access root. Repeating the same selection is idempotent; switching to another project is rejected.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in SetProjectRootInput) (*mcp.CallToolResult, projects.WorkspaceInfo, error) {
+		out, err := r.projects.Select(requestMeta(req), in.Path, in.CreateWorktree)
+		return nil, out, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "list_worktrees",
+		Description: "List Git worktrees belonging to the project selected for this conversation.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, projects.WorktreeListOutput, error) {
+		out, err := r.projects.ListWorktrees(requestMeta(req))
+		return nil, out, err
+	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "get_environment",
 		Description: "Return the active workspace root, platform, and default shell.",
-	}, func(context.Context, *mcp.CallToolRequest, EmptyInput) (*mcp.CallToolResult, EnvironmentOutput, error) {
+	}, func(_ context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, EnvironmentOutput, error) {
+		root, selection, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, EnvironmentOutput{}, err
+		}
 		shell := "/bin/sh"
 		if runtime.GOOS == "windows" {
 			shell = "powershell"
@@ -159,17 +201,24 @@ func (r *Runtime) registerTools() {
 			username = current.Username
 		}
 		return nil, EnvironmentOutput{
-			Platform:      runtime.GOOS + "/" + runtime.GOARCH,
-			WorkspaceRoot: r.root.Path(),
-			DefaultShell:  shell,
-			Username:      username,
+			Platform:        runtime.GOOS + "/" + runtime.GOARCH,
+			WorkspaceRoot:   root.Path(),
+			AccessRoot:      selection.AccessRoot,
+			ManagedWorktree: selection.ManagedWorktree,
+			BindingScope:    selection.BindingScope,
+			DefaultShell:    shell,
+			Username:        username,
 		}, nil
 	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "read_file",
 		Description: "Read a UTF-8 text file inside the workspace with line numbers.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in agenttools.ReadFileInput) (*mcp.CallToolResult, agenttools.ReadFileOutput, error) {
+	}, func(_ context.Context, req *mcp.CallToolRequest, in agenttools.ReadFileInput) (*mcp.CallToolResult, agenttools.ReadFileOutput, error) {
+		files, err := r.filesFor(req)
+		if err != nil {
+			return nil, agenttools.ReadFileOutput{}, err
+		}
 		out, err := files.ReadFile(in)
 		return nil, out, err
 	})
@@ -177,7 +226,11 @@ func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "write_file",
 		Description: "Create or replace a UTF-8 text file inside the workspace. Parent directories are created automatically.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in agenttools.WriteFileInput) (*mcp.CallToolResult, agenttools.WriteFileOutput, error) {
+	}, func(_ context.Context, req *mcp.CallToolRequest, in agenttools.WriteFileInput) (*mcp.CallToolResult, agenttools.WriteFileOutput, error) {
+		files, err := r.filesFor(req)
+		if err != nil {
+			return nil, agenttools.WriteFileOutput{}, err
+		}
 		out, err := files.WriteFile(in)
 		return nil, out, err
 	})
@@ -185,7 +238,11 @@ func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "glob",
 		Description: "Find files inside the workspace using glob patterns including double-star recursion.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in agenttools.GlobInput) (*mcp.CallToolResult, agenttools.GlobOutput, error) {
+	}, func(_ context.Context, req *mcp.CallToolRequest, in agenttools.GlobInput) (*mcp.CallToolResult, agenttools.GlobOutput, error) {
+		files, err := r.filesFor(req)
+		if err != nil {
+			return nil, agenttools.GlobOutput{}, err
+		}
 		out, err := files.Glob(in)
 		return nil, out, err
 	})
@@ -193,7 +250,11 @@ func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "grep",
 		Description: "Search text files inside the workspace with an RE2 regular expression.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in agenttools.GrepInput) (*mcp.CallToolResult, agenttools.GrepOutput, error) {
+	}, func(_ context.Context, req *mcp.CallToolRequest, in agenttools.GrepInput) (*mcp.CallToolResult, agenttools.GrepOutput, error) {
+		files, err := r.filesFor(req)
+		if err != nil {
+			return nil, agenttools.GrepOutput{}, err
+		}
 		out, err := files.Grep(in)
 		return nil, out, err
 	})
@@ -211,7 +272,11 @@ func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "git_status",
 		Description: "Show concise Git working-tree and branch status for the workspace.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in agenttools.GitStatusInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in agenttools.GitStatusInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
+		git, err := r.gitFor(req)
+		if err != nil {
+			return nil, agenttools.GitOutput{}, err
+		}
 		out, err := git.Status(ctx, in)
 		return nil, out, err
 	})
@@ -219,7 +284,11 @@ func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "git_diff",
 		Description: "Show the workspace Git diff without external diff helpers or color.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in agenttools.GitDiffInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in agenttools.GitDiffInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
+		git, err := r.gitFor(req)
+		if err != nil {
+			return nil, agenttools.GitOutput{}, err
+		}
 		out, err := git.Diff(ctx, in)
 		return nil, out, err
 	})
@@ -227,7 +296,11 @@ func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "git_log",
 		Description: "Show recent Git commits for the workspace.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in agenttools.GitLogInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in agenttools.GitLogInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
+		git, err := r.gitFor(req)
+		if err != nil {
+			return nil, agenttools.GitOutput{}, err
+		}
 		out, err := git.Log(ctx, in)
 		return nil, out, err
 	})
@@ -235,11 +308,24 @@ func (r *Runtime) registerTools() {
 
 type EmptyInput struct{}
 
+type ListProjectsInput struct {
+	Query string `json:"query,omitempty" jsonschema:"optional case-insensitive filter over project name, selector, and description"`
+	Limit int    `json:"limit,omitempty" jsonschema:"maximum projects to return, default 50 and maximum 200"`
+}
+
+type SetProjectRootInput struct {
+	Path           string `json:"path" jsonschema:"project path relative to the configured access root; use a selector returned by list_projects"`
+	CreateWorktree *bool  `json:"createWorktree,omitempty" jsonschema:"explicitly force or disable managed-worktree creation; omit to follow configured worktree mode"`
+}
+
 type EnvironmentOutput struct {
-	Platform      string `json:"platform"`
-	WorkspaceRoot string `json:"workspaceRoot"`
-	DefaultShell  string `json:"defaultShell"`
-	Username      string `json:"username"`
+	Platform        string `json:"platform"`
+	WorkspaceRoot   string `json:"workspaceRoot"`
+	AccessRoot      string `json:"accessRoot"`
+	ManagedWorktree bool   `json:"managedWorktree"`
+	BindingScope    string `json:"bindingScope"`
+	DefaultShell    string `json:"defaultShell"`
+	Username        string `json:"username"`
 }
 
 type ExecCommandInput struct {
@@ -256,8 +342,12 @@ type ExecCommandOutput struct {
 	ExitCode  *int   `json:"exit_code,omitempty"`
 }
 
-func (r *Runtime) execCommand(_ context.Context, _ *mcp.CallToolRequest, in ExecCommandInput) (*mcp.CallToolResult, ExecCommandOutput, error) {
-	workdir, err := r.root.Resolve(in.Workdir, false)
+func (r *Runtime) execCommand(_ context.Context, req *mcp.CallToolRequest, in ExecCommandInput) (*mcp.CallToolResult, ExecCommandOutput, error) {
+	root, _, err := r.workspaceFor(req)
+	if err != nil {
+		return nil, ExecCommandOutput{}, err
+	}
+	workdir, err := root.Resolve(in.Workdir, false)
 	if err != nil {
 		return nil, ExecCommandOutput{}, err
 	}
@@ -302,6 +392,46 @@ func (r *Runtime) writeStdin(_ context.Context, _ *mcp.CallToolRequest, in Write
 		Running:   res.Running,
 		ExitCode:  res.ExitCode,
 	}, nil
+}
+
+func (r *Runtime) workspaceFor(req *mcp.CallToolRequest) (*workspace.Root, projects.WorkspaceInfo, error) {
+	return r.projects.Workspace(requestMeta(req))
+}
+
+func (r *Runtime) filesFor(req *mcp.CallToolRequest) (*agenttools.Files, error) {
+	root, _, err := r.workspaceFor(req)
+	if err != nil {
+		return nil, err
+	}
+	return &agenttools.Files{Root: root}, nil
+}
+
+func (r *Runtime) gitFor(req *mcp.CallToolRequest) (*agenttools.Git, error) {
+	root, _, err := r.workspaceFor(req)
+	if err != nil {
+		return nil, err
+	}
+	return &agenttools.Git{Root: root}, nil
+}
+
+func requestMeta(req *mcp.CallToolRequest) map[string]any {
+	if req == nil || req.Params == nil || req.Params.Meta == nil {
+		return nil
+	}
+	return req.Params.Meta
+}
+
+func builtInToolNames() map[string]struct{} {
+	names := []string{
+		"list_projects", "set_project_root", "list_worktrees", "get_environment",
+		"read_file", "write_file", "glob", "grep", "exec_command", "write_stdin",
+		"git_status", "git_diff", "git_log",
+	}
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[name] = struct{}{}
+	}
+	return out
 }
 
 func (r *Runtime) auth(next http.Handler) http.Handler {
