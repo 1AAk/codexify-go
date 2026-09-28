@@ -21,6 +21,10 @@ type Status struct {
 	State     svc.State
 }
 
+func IsRunning(status Status) bool {
+	return status.Installed && status.State == svc.Running
+}
+
 func StateString(state svc.State) string {
 	switch state {
 	case svc.Stopped:

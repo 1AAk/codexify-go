@@ -9,10 +9,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/benice2me11/codexify-go/internal/buildinfo"
 	"github.com/benice2me11/codexify-go/internal/config"
 )
 
-const BaseVersion = "0.6.0-dev"
+const BaseVersion = buildinfo.Version
 
 type Store struct {
 	dir string
@@ -21,6 +22,12 @@ type Store struct {
 
 func Version(cfg config.Config) string {
 	version := BaseVersion
+	if cfg.AgentChat.Enabled {
+		version += "+markdown-chat-v5"
+	}
+	if cfg.Experimental.AgentTickets {
+		version += "+tickets-v1"
+	}
 	if cfg.MCP.MultiProject {
 		version += "+workspace-v1"
 	}

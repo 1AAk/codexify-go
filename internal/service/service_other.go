@@ -13,6 +13,8 @@ type Status struct {
 	State     int
 }
 
+func IsRunning(Status) bool { return false }
+
 func StateString(int) string { return "unsupported" }
 
 func unsupported() error {

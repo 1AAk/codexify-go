@@ -19,6 +19,7 @@ import (
 
 	"github.com/benice2me11/codexify-go/internal/artifacts"
 	"github.com/benice2me11/codexify-go/internal/config"
+	"github.com/benice2me11/codexify-go/internal/projects"
 	"github.com/benice2me11/codexify-go/internal/ui"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -597,6 +598,131 @@ func TestArtifactMemoryAndSkillsOverMCP(t *testing.T) {
 	}
 	if len(resource.Contents) != 1 || string(resource.Contents[0].Blob) != "immutable report\n" {
 		t.Fatalf("artifact snapshot changed: %+v", resource.Contents)
+	}
+}
+
+func TestMarkdownChatOverMCP(t *testing.T) {
+	accessRoot := t.TempDir()
+	projectRoot := filepath.Join(accessRoot, "project-a")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "go.mod"), []byte("module example/chat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.MCP.WorkspaceRoot = accessRoot
+	cfg.MCP.MultiProject = true
+	cfg.MCP.BindingsDir = filepath.Join(accessRoot, ".state", "bindings")
+	cfg.MCP.Worktrees = config.WorktreeConfig{Mode: "never", Root: filepath.Join(accessRoot, ".state", "worktrees")}
+	cfg.MCP.AuthEnabled = false
+	cfg.AgentChat.Enabled = true
+	cfg.AgentChat.Dir = filepath.Join(t.TempDir(), "chats")
+	cfg.AgentChat.MaxWaitMS = 1500
+	cfg.Tunnel.MCPServerURL = "http://127.0.0.1:0/mcp"
+	cfg.Tunnel.Executable = filepath.Join(t.TempDir(), "unused.exe")
+	cfg.Tunnel.TunnelID = "tunnel_chat_test"
+	cfg.Tunnel.APIKeyRef = "env:TEST"
+
+	r, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.listener.Close()
+		r.exec.Close()
+		if r.bridge != nil {
+			r.bridge.Close()
+		}
+	})
+	httpServer := httptest.NewServer(r.Handler())
+	defer httpServer.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "chat-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL + "/mcp",
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	meta := mcp.Meta{"openai/session": "markdown-chat-conversation"}
+	selected, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Meta:      meta,
+		Name:      "set_project_root",
+		Arguments: map[string]any{"path": "project-a", "createWorktree": false},
+	})
+	if err != nil || selected.IsError {
+		t.Fatalf("selection failed: err=%v result=%+v", err, selected)
+	}
+
+	brief, err := session.CallTool(context.Background(), &mcp.CallToolParams{Meta: meta, Name: "get_agent_brief", Arguments: map[string]any{}})
+	if err != nil || brief.IsError || !strings.Contains(fmt.Sprint(brief.StructuredContent), "Markdown chat") {
+		t.Fatalf("brief missing chat section: err=%v result=%+v", err, brief)
+	}
+	identity := projects.IdentityFromMeta(map[string]any{"openai/session": "markdown-chat-conversation"})
+	chatPath, err := r.chat.Path(projectRoot, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(chatPath); err != nil {
+		t.Fatalf("CHAT.md was not created by get_agent_brief: %v", err)
+	}
+
+	appendChat := func(text string) {
+		t.Helper()
+		file, err := os.OpenFile(chatPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(text); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendChat("user message one\n")
+	read, err := session.CallTool(context.Background(), &mcp.CallToolParams{Meta: meta, Name: "chat_read", Arguments: map[string]any{}})
+	if err != nil || read.IsError || !strings.Contains(fmt.Sprint(read.StructuredContent), "user message one") {
+		t.Fatalf("chat_read failed: err=%v result=%+v", err, read)
+	}
+	written, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Meta:      meta,
+		Name:      "chat_write",
+		Arguments: map[string]any{"message": "agent answer one"},
+	})
+	if err != nil || written.IsError || !strings.Contains(fmt.Sprint(written.StructuredContent), "written") {
+		t.Fatalf("chat_write failed: err=%v result=%+v", err, written)
+	}
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		file, openErr := os.OpenFile(chatPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if openErr != nil {
+			return
+		}
+		_, _ = file.WriteString("async user message\n")
+		_ = file.Close()
+	}()
+	awaitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	awaited, err := session.CallTool(awaitCtx, &mcp.CallToolParams{Meta: meta, Name: "chat_await", Arguments: map[string]any{}})
+	if err != nil || awaited.IsError || !strings.Contains(fmt.Sprint(awaited.StructuredContent), "async user message") {
+		t.Fatalf("chat_await failed: err=%v result=%+v", err, awaited)
+	}
+
+	data, err := os.ReadFile(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "## Agent\n\nagent answer one") {
+		t.Fatalf("CHAT.md missing agent block: %s", data)
 	}
 }
 

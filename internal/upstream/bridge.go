@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benice2me11/codexify-go/internal/buildinfo"
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
@@ -314,7 +315,7 @@ func connectSource(ctx context.Context, spec config.UpstreamMCPConfig, logger *s
 	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "codexify-go-bridge", Version: "0.6.0-dev"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "codexify-go-bridge", Version: buildinfo.Version}, nil)
 	var transport mcp.Transport
 	switch transportKind {
 	case "stdio":

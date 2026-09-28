@@ -41,6 +41,8 @@ type Config struct {
 	Diff            DiffConfig            `json:"diff"`
 	ArtifactIngress ArtifactIngressConfig `json:"artifactIngress"`
 	ArtifactEgress  ArtifactEgressConfig  `json:"artifactEgress"`
+	AgentChat       AgentChatConfig       `json:"agentChat"`
+	Experimental    ExperimentalConfig    `json:"experimental"`
 	Tunnel          TunnelConfig          `json:"tunnel"`
 	Supervisor      SupervisorConfig      `json:"supervisor"`
 }
@@ -102,9 +104,11 @@ type MemoryConfig struct {
 }
 
 type SkillsConfig struct {
-	Enabled     bool     `json:"enabled"`
-	IncludeUser bool     `json:"includeUser"`
-	Dirs        []string `json:"dirs,omitempty"`
+	Enabled        bool     `json:"enabled"`
+	IncludeUser    bool     `json:"includeUser"`
+	IncludePlugins *bool    `json:"includePlugins,omitempty"`
+	ClaudePlugins  bool     `json:"claudePlugins,omitempty"`
+	Dirs           []string `json:"dirs,omitempty"`
 }
 
 type ProjectDocConfig struct {
@@ -138,8 +142,19 @@ type ArtifactEgressConfig struct {
 	ReferenceTTL         Duration `json:"referenceTtl,omitempty"`
 }
 
+type AgentChatConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Dir       string `json:"dir,omitempty"`
+	MaxWaitMS int    `json:"maxWaitMs,omitempty"`
+}
+
+type ExperimentalConfig struct {
+	AgentTickets bool `json:"agentTickets"`
+}
+
 type TunnelConfig struct {
-	Executable          string            `json:"executable"`
+	Executable          string            `json:"executable,omitempty"`
+	ManagedDir          string            `json:"managedDir,omitempty"`
 	TunnelID            string            `json:"tunnelId"`
 	APIKeyRef           string            `json:"apiKeyRef"`
 	OrganizationID      string            `json:"organizationId,omitempty"`
@@ -214,6 +229,10 @@ func Default() Config {
 			MaxReferences:        64,
 			ReferenceTTL:         Duration(5 * time.Minute),
 		},
+		AgentChat: AgentChatConfig{
+			Enabled:   false,
+			MaxWaitMS: 55_000,
+		},
 		Tunnel: TunnelConfig{
 			StartupWaitTimeout: Duration(15 * time.Second),
 			HealthURLFile:      filepath.Join(os.TempDir(), "codexify-go-tunnel-health.url"),
@@ -266,6 +285,11 @@ func (c *Config) expand(base string) {
 	if c.ArtifactEgress.Dir != "" {
 		c.ArtifactEgress.Dir = expand(c.ArtifactEgress.Dir)
 	}
+	if c.AgentChat.Dir == "" {
+		c.AgentChat.Dir = filepath.Join(base, ".codexify-go", "chats")
+	} else {
+		c.AgentChat.Dir = expand(c.AgentChat.Dir)
+	}
 	for i, dir := range c.Skills.Dirs {
 		c.Skills.Dirs[i] = expand(dir)
 	}
@@ -311,6 +335,11 @@ func (c *Config) expand(base string) {
 		}
 	}
 	c.Tunnel.Executable = expand(c.Tunnel.Executable)
+	if c.Tunnel.ManagedDir == "" {
+		c.Tunnel.ManagedDir = filepath.Join(base, ".codexify-go", "openai-tunnel")
+	} else {
+		c.Tunnel.ManagedDir = expand(c.Tunnel.ManagedDir)
+	}
 	c.Tunnel.HealthURLFile = expand(c.Tunnel.HealthURLFile)
 	c.Tunnel.APIKeyRef = expandReference(c.Tunnel.APIKeyRef, base)
 	c.Tunnel.MCPAuthorizationRef = os.ExpandEnv(c.Tunnel.MCPAuthorizationRef)
@@ -391,6 +420,9 @@ func (c Config) Validate() error {
 	if c.ArtifactEgress.ReferenceTTL.Duration() <= 0 {
 		errs = append(errs, errors.New("artifactEgress.referenceTtl must be > 0"))
 	}
+	if c.AgentChat.MaxWaitMS < 1_000 || c.AgentChat.MaxWaitMS > 300_000 {
+		errs = append(errs, errors.New("agentChat.maxWaitMs must be between 1000 and 300000"))
+	}
 	if c.MCP.ProjectScanDepth < 0 || c.MCP.ProjectScanDepth > 8 {
 		errs = append(errs, errors.New("mcp.projectScanDepth must be between 0 and 8"))
 	}
@@ -438,8 +470,8 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("MCP upstream %q mode must be catalog, direct, or gateway", name))
 		}
 	}
-	if strings.TrimSpace(c.Tunnel.Executable) == "" {
-		errs = append(errs, errors.New("tunnel.executable is required"))
+	if strings.TrimSpace(c.Tunnel.Executable) == "" && strings.TrimSpace(c.Tunnel.ManagedDir) == "" {
+		errs = append(errs, errors.New("tunnel.managedDir is required when tunnel.executable is omitted"))
 	}
 	if strings.TrimSpace(c.Tunnel.TunnelID) == "" {
 		errs = append(errs, errors.New("tunnel.tunnelId is required"))

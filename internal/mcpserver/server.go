@@ -21,17 +21,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benice2me11/codexify-go/internal/agenttickets"
 	"github.com/benice2me11/codexify-go/internal/agenttools"
 	"github.com/benice2me11/codexify-go/internal/artifacts"
+	"github.com/benice2me11/codexify-go/internal/buildinfo"
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/connectorschema"
 	diffmgr "github.com/benice2me11/codexify-go/internal/diff"
 	"github.com/benice2me11/codexify-go/internal/execsession"
 	"github.com/benice2me11/codexify-go/internal/ingress"
+	"github.com/benice2me11/codexify-go/internal/markdownchat"
 	"github.com/benice2me11/codexify-go/internal/memory"
 	patchtool "github.com/benice2me11/codexify-go/internal/patch"
 	"github.com/benice2me11/codexify-go/internal/projectdoc"
 	"github.com/benice2me11/codexify-go/internal/projects"
+	"github.com/benice2me11/codexify-go/internal/selfupdate"
 	"github.com/benice2me11/codexify-go/internal/skills"
 	"github.com/benice2me11/codexify-go/internal/ui"
 	"github.com/benice2me11/codexify-go/internal/upstream"
@@ -54,6 +58,8 @@ type Runtime struct {
 	diff      *diffmgr.Manager
 	diffKey   string
 	ingress   *ingress.Downloader
+	chat      *markdownchat.Store
+	tickets   *agenttickets.Manager
 	exec      *execsession.Manager
 	server    *mcp.Server
 	http      *http.Server
@@ -110,10 +116,15 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 		ln.Close()
 		return nil, fmt.Errorf("initialize connector schema store: %w", err)
 	}
-	schemaVersion := connectorschema.Version(cfg)
-	if err := schemaStore.RecordConnector(schemaVersion); err != nil {
-		logger.Warn("could not persist connector schema version", "error", err)
+	var ticketManager *agenttickets.Manager
+	if cfg.Experimental.AgentTickets {
+		ticketManager, err = agenttickets.NewForTunnel(cfg.Tunnel.TunnelID)
+		if err != nil {
+			ln.Close()
+			return nil, fmt.Errorf("initialize agent ticket store: %w", err)
+		}
 	}
+	schemaVersion := connectorschema.Version(cfg)
 	r := &Runtime{
 		cfg:       cfg,
 		root:      root,
@@ -126,18 +137,30 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 		diff:      diffmgr.New(cfg.Diff),
 		diffKey:   diffKey,
 		ingress:   ingress.New(cfg.ArtifactIngress),
+		chat:      markdownchat.New(cfg.AgentChat),
+		tickets:   ticketManager,
 		exec:      execsession.NewManager(),
 		listener:  ln,
 		token:     token,
 		log:       logger,
 	}
+	instructions := "Select a workspace before project work in multi-project mode, then call get_agent_brief once and follow the returned environment, saved state, skills, and AGENTS.md instructions. Connector version marker: " + schemaVersion
+	if cfg.AgentChat.Enabled {
+		instructions += " Markdown chat is enabled: use chat_write for user-facing Markdown chat messages, chat_read for new CHAT.md user text, and chat_await as the idle state; do not treat chat_write/chat_read as terminal actions."
+	}
+	if cfg.Experimental.AgentTickets {
+		instructions += " " + agenttickets.Instructions
+	}
 	r.server = mcp.NewServer(&mcp.Implementation{
 		Name:    "codexify-go",
-		Version: connectorschema.BaseVersion,
+		Version: buildinfo.Version,
 	}, &mcp.ServerOptions{
 		Logger:       logger,
-		Instructions: "Select a workspace before project work in multi-project mode, then call get_agent_brief once and follow the returned environment, saved state, skills, and AGENTS.md instructions. Connector version marker: " + schemaVersion,
+		Instructions: instructions,
 	})
+	if r.tickets != nil {
+		r.server.AddReceivingMiddleware(r.ticketMiddleware())
+	}
 	r.registerUIResources()
 	r.registerTools()
 	if r.artifacts.Enabled() {
@@ -184,7 +207,11 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 		MaxRequestBodyBytes: cfg.MCP.MaxRequestBodyBytes,
 		Logger:              logger,
 	})
-	mcpHandler := hybridMCPHandler(statelessHandler, statefulHandler, cfg.MCP.MaxRequestBodyBytes)
+	mcpHandler := hybridMCPHandler(statelessHandler, statefulHandler, cfg.MCP.MaxRequestBodyBytes, func() {
+		if err := r.schema.RecordConnector(r.schemaVer); err != nil {
+			r.log.Warn("could not persist connector discovery version", "error", err)
+		}
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle(endpoint, r.auth(mcpHandler))
@@ -196,7 +223,7 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 	return r, nil
 }
 
-func hybridMCPHandler(stateless, stateful http.Handler, maxBody int64) http.Handler {
+func hybridMCPHandler(stateless, stateful http.Handler, maxBody int64, onDiscover func()) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		useStateless, err := requestUsesStatelessProtocol(req, maxBody)
 		if err != nil {
@@ -208,11 +235,41 @@ func hybridMCPHandler(stateless, stateful http.Handler, maxBody int64) http.Hand
 			return
 		}
 		if useStateless {
+			if onDiscover != nil && requestMCPMethod(req, maxBody) == "server/discover" {
+				onDiscover()
+			}
 			stateless.ServeHTTP(w, req)
 			return
 		}
 		stateful.ServeHTTP(w, req)
 	})
+}
+
+func requestMCPMethod(req *http.Request, maxBody int64) string {
+	if req == nil {
+		return ""
+	}
+	if method := strings.TrimSpace(req.Header.Get("Mcp-Method")); method != "" {
+		return method
+	}
+	if req.Method != http.MethodPost || req.Body == nil {
+		return ""
+	}
+	if maxBody <= 0 {
+		maxBody = 4 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))
+	if err != nil || int64(len(data)) > maxBody {
+		return ""
+	}
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	var envelope struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return ""
+	}
+	return envelope.Method
 }
 
 var errRequestBodyTooLarge = errors.New("request body exceeds configured limit")
@@ -317,6 +374,60 @@ func (r *Runtime) registerTools() {
 		return nil, TextOutput{Content: content}, err
 	})
 
+	if r.chat.Enabled() {
+		chatMeta := mcp.Meta{"ui": map[string]any{"visibility": []string{"model"}}}
+		mcp.AddTool(r.server, &mcp.Tool{
+			Meta:        chatMeta,
+			Name:        "chat_read",
+			Description: "NON-TERMINAL TOOL. Read and acknowledge all new user text in this conversation's CHAT.md without truncation. Continue useful work afterward; if no work remains, use chat_await rather than ending the turn.",
+		}, func(_ context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, markdownchat.Result, error) {
+			root, _, err := r.workspaceFor(req)
+			if err != nil {
+				return nil, markdownchat.Result{}, err
+			}
+			identity := projects.IdentityFromMeta(r.requestMeta(req))
+			out, err := r.chat.Read(root.Path(), identity, true)
+			return nil, out, err
+		})
+
+		mcp.AddTool(r.server, &mcp.Tool{
+			Meta:        chatMeta,
+			Name:        "chat_write",
+			Description: "NON-TERMINAL TOOL. Append one complete Markdown message to this conversation's CHAT.md. This is the supported agent write path for Markdown chat; after writing, continue work or use chat_await.",
+		}, func(_ context.Context, req *mcp.CallToolRequest, in ChatWriteInput) (*mcp.CallToolResult, markdownchat.Result, error) {
+			root, _, err := r.workspaceFor(req)
+			if err != nil {
+				return nil, markdownchat.Result{}, err
+			}
+			identity := projects.IdentityFromMeta(r.requestMeta(req))
+			out, err := r.chat.Write(root.Path(), identity, in.Message)
+			return nil, out, err
+		})
+
+		mcp.AddTool(r.server, &mcp.Tool{
+			Meta:        chatMeta,
+			Name:        "chat_await",
+			Description: "NON-TERMINAL TOOL. Wait for new user text in this conversation's CHAT.md or for workspace selection/change. The server-configured deadline cannot be overridden by the caller.",
+		}, func(ctx context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, markdownchat.Result, error) {
+			meta := r.requestMeta(req)
+			identity := projects.IdentityFromMeta(meta)
+			if identity == nil {
+				return nil, markdownchat.Result{}, errors.New("Markdown chat requires a conversation or stateful MCP transport-session identity")
+			}
+			out, err := r.chat.Await(ctx, func() (string, *projects.Identity, bool, error) {
+				status, statusErr := r.projects.Status(meta)
+				if statusErr != nil {
+					return "", identity, false, statusErr
+				}
+				if !status.Selected || status.Workspace == nil {
+					return "", identity, false, nil
+				}
+				return status.Workspace.ProjectRoot, identity, true, nil
+			})
+			return nil, out, err
+		})
+	}
+
 	mcp.AddTool(r.server, &mcp.Tool{
 		Name:        "get_project_doc",
 		Description: "Read AGENTS.override.md/AGENTS.md instructions from the project root down to the active workspace, outermost first, under a shared byte budget.",
@@ -385,12 +496,16 @@ func (r *Runtime) registerTools() {
 		Meta:        ui.AppOnlyToolMeta(),
 		Name:        "setup_status",
 		Description: "Read current workspace-selection status for the setup app without modifying project state.",
-	}, func(_ context.Context, req *mcp.CallToolRequest, in SetupStatusInput) (*mcp.CallToolResult, SetupStatusOutput, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in SetupStatusInput) (*mcp.CallToolResult, SetupStatusOutput, error) {
+		started := time.Now()
 		status, err := r.projects.Status(r.requestMeta(req))
 		if err != nil {
 			return nil, SetupStatusOutput{}, err
 		}
 		conversationVersion := strings.TrimSpace(in.ConversationVersion)
+		if len(conversationVersion) > 64 {
+			return nil, SetupStatusOutput{}, errors.New("conversationVersion must be at most 64 bytes")
+		}
 		identity := projects.IdentityFromMeta(r.requestMeta(req))
 		if identity != nil && identity.Persistent {
 			if conversationVersion != "" {
@@ -401,11 +516,17 @@ func (r *Runtime) registerTools() {
 				conversationVersion = r.schema.ConversationVersion(identity.Key)
 			}
 		}
+		reloadedVersion := r.schema.ConnectorVersion()
+		connectorInfo := connectorSchemaInfo(r.schemaVer, reloadedVersion, conversationVersion)
+		update := selfupdate.Inspect(ctx, buildinfo.Version, in.ForceUpdateCheck)
 		return nil, SetupStatusOutput{
-			Version:             connectorschema.BaseVersion,
+			Version:             buildinfo.Version,
 			ConnectorVersion:    r.schemaVer,
 			ConversationVersion: conversationVersion,
 			ConversationStale:   conversationVersion != "" && conversationVersion != r.schemaVer,
+			ConnectorSchema:     connectorInfo,
+			Update:              update,
+			UpdateCheckMS:       time.Since(started).Milliseconds(),
 			MultiProject:        status.MultiProject,
 			AccessRoot:          status.AccessRoot,
 			WorktreeMode:        status.WorktreeMode,
@@ -752,6 +873,10 @@ func (r *Runtime) registerUIResources() {
 
 type EmptyInput struct{}
 
+type ChatWriteInput struct {
+	Message string `json:"message" jsonschema:"complete Markdown message to append to this conversation's CHAT.md"`
+}
+
 type ListProjectsInput struct {
 	Query string `json:"query,omitempty" jsonschema:"optional case-insensitive filter over project name, selector, and description"`
 	Limit int    `json:"limit,omitempty" jsonschema:"maximum projects to return, default 50 and maximum 200"`
@@ -783,6 +908,9 @@ type SetupStatusOutput struct {
 	ConnectorVersion    string                  `json:"connectorVersion"`
 	ConversationVersion string                  `json:"conversationVersion,omitempty"`
 	ConversationStale   bool                    `json:"conversationStale"`
+	ConnectorSchema     ConnectorSchemaInfo     `json:"connectorSchema"`
+	Update              selfupdate.Inspection   `json:"update"`
+	UpdateCheckMS       int64                   `json:"updateCheckMs"`
 	MultiProject        bool                    `json:"multiProject"`
 	AccessRoot          string                  `json:"accessRoot"`
 	WorktreeMode        string                  `json:"worktreeMode"`
@@ -792,8 +920,37 @@ type SetupStatusOutput struct {
 }
 
 type SetupStatusInput struct {
-	ForceUpdateCheck    bool   `json:"forceUpdateCheck,omitempty" jsonschema:"reserved for future bounded update checks; currently does not perform network update discovery"`
+	ForceUpdateCheck    bool   `json:"forceUpdateCheck,omitempty" jsonschema:"bypass the short release-check cache and query the latest GitHub release now"`
 	ConversationVersion string `json:"conversationVersion,omitempty" jsonschema:"connector version marker currently held by the conversation/UI"`
+}
+
+type ConnectorSchemaInfo struct {
+	Status             string `json:"status"`
+	AdvertisedVersion  string `json:"advertisedVersion"`
+	ObservedVersion    string `json:"observedVersion,omitempty"`
+	ConnectorVersion   string `json:"connectorVersion,omitempty"`
+	RefreshRecommended bool   `json:"refreshRecommended"`
+}
+
+func connectorSchemaInfo(server, connector, conversation string) ConnectorSchemaInfo {
+	status := "unknown"
+	switch {
+	case connector != "" && connector != server:
+		status = "stale"
+	case connector != "" && connector == server && conversation == server:
+		status = "current"
+	case connector != "" && connector == server:
+		status = "conversation_stale"
+	case connector == "" && conversation != "" && conversation != server:
+		status = "stale"
+	}
+	return ConnectorSchemaInfo{
+		Status:             status,
+		AdvertisedVersion:  server,
+		ObservedVersion:    conversation,
+		ConnectorVersion:   connector,
+		RefreshRecommended: status == "stale",
+	}
 }
 
 type TextOutput struct {
@@ -1043,6 +1200,15 @@ func (r *Runtime) agentBrief(req *mcp.CallToolRequest) (string, error) {
 		}
 	}
 
+	if r.chat.Enabled() {
+		identity := projects.IdentityFromMeta(r.requestMeta(req))
+		path, chatErr := r.chat.Ensure(root.Path(), identity)
+		if chatErr != nil {
+			return "", chatErr
+		}
+		sections = append(sections, "## This conversation's Markdown chat\n\nCHAT.md: `"+path+"`\n\nRead new user text with chat_read, send user-facing Markdown with chat_write, and use chat_await as the idle state. Direct read_file/grep is for history only; do not write CHAT.md with ordinary file tools.")
+	}
+
 	doc := projectdoc.Load(root.Path(), r.cfg.ProjectDoc)
 	if strings.TrimSpace(doc.Content) != "" {
 		sections = append(sections, "The project's own instructions follow the marker below. They take precedence over the generic workflow guidance above.\n\n"+projectdoc.Separator+"\n\n"+doc.Content)
@@ -1053,6 +1219,7 @@ func (r *Runtime) agentBrief(req *mcp.CallToolRequest) (string, error) {
 func builtInToolNames() map[string]struct{} {
 	names := []string{
 		"get_agent_brief", "get_project_doc",
+		"chat_read", "chat_write", "chat_await",
 		"list_projects", "set_project_root", "setup_ui_switch_project", "setup_status", "list_worktrees", "get_environment",
 		"recall", "remember", "update_memory_note", "forget_memory_note", "skills_list", "skills_read",
 		"export_host_file", "import_host_file",
@@ -1064,6 +1231,131 @@ func builtInToolNames() map[string]struct{} {
 		out[name] = struct{}{}
 	}
 	return out
+}
+
+func (r *Runtime) ticketMiddleware() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+			if r.tickets == nil {
+				return next(ctx, method, request)
+			}
+			switch method {
+			case "tools/list":
+				result, err := next(ctx, method, request)
+				if err != nil {
+					return nil, err
+				}
+				listed, ok := result.(*mcp.ListToolsResult)
+				if !ok || listed == nil {
+					return result, nil
+				}
+				cloned := make([]*mcp.Tool, 0, len(listed.Tools))
+				for _, tool := range listed.Tools {
+					ticketed := !appOnlyTool(tool)
+					augmented, policy, augmentErr := agenttickets.AugmentTool(tool, ticketed)
+					if augmentErr != nil {
+						return nil, fmt.Errorf("augment agent-ticket schema for %q: %w", tool.Name, augmentErr)
+					}
+					r.tickets.SetPolicy(tool.Name, policy)
+					cloned = append(cloned, augmented)
+				}
+				copyResult := *listed
+				copyResult.Tools = cloned
+				return &copyResult, nil
+
+			case "tools/call":
+				call, ok := request.(*mcp.CallToolRequest)
+				if !ok || call == nil || call.Params == nil {
+					return next(ctx, method, request)
+				}
+				policy, known := r.tickets.Policy(call.Params.Name)
+				if !known {
+					policy = agenttickets.Policy{Ticketed: !appOnlyToolName(call.Params.Name)}
+				}
+				if !policy.Ticketed {
+					return next(ctx, method, request)
+				}
+				if ctx.Err() != nil {
+					return agenttickets.RejectionResult("Call cancelled before ticket reservation; this call did not run and the ticket is unchanged."), nil
+				}
+
+				object, supplied, takeErr := agenttickets.TakeTicket(call.Params.Arguments)
+				if takeErr != nil {
+					return agenttickets.RejectionResult(takeErr.Error()), nil
+				}
+				identity := projects.IdentityFromMeta(r.requestMeta(call))
+				permit, reserveErr := r.tickets.Reserve(identity, supplied)
+				if reserveErr != nil {
+					return agenttickets.RejectionResult(reserveErr.Error()), nil
+				}
+
+				clean, cleanErr := agenttickets.CleanArguments(object, policy)
+				var result mcp.Result
+				var err error
+				if cleanErr != nil {
+					result = agenttickets.RejectionResult(cleanErr.Error())
+				} else {
+					call.Params.Arguments = clean
+					result, err = next(ctx, method, request)
+					if err != nil {
+						permit.Release()
+						return nil, err
+					}
+				}
+
+				nextTicket, commitErr := permit.Commit(ctx)
+				if commitErr != nil {
+					return agenttickets.RejectionResult(commitErr.Error()), nil
+				}
+				callResult, ok := result.(*mcp.CallToolResult)
+				if !ok || callResult == nil {
+					return agenttickets.RejectionResult("Ticket handoff failed after dispatch; tool result had an unexpected type. Work may already have run; do not retry blindly."), nil
+				}
+				agenttickets.AttachTicket(callResult, nextTicket, policy)
+				return callResult, nil
+			default:
+				return next(ctx, method, request)
+			}
+		}
+	}
+}
+
+func appOnlyTool(tool *mcp.Tool) bool {
+	if tool == nil {
+		return false
+	}
+	if raw, ok := tool.Meta["openai/visibility"].(string); ok && strings.EqualFold(raw, "private") {
+		return true
+	}
+	ui, _ := tool.Meta["ui"].(map[string]any)
+	if ui == nil {
+		return false
+	}
+	hasApp := false
+	hasModel := false
+	switch visibility := ui["visibility"].(type) {
+	case []string:
+		for _, item := range visibility {
+			hasApp = hasApp || item == "app"
+			hasModel = hasModel || item == "model"
+		}
+	case []any:
+		for _, raw := range visibility {
+			item, _ := raw.(string)
+			hasApp = hasApp || item == "app"
+			hasModel = hasModel || item == "model"
+		}
+	}
+	return hasApp && !hasModel
+}
+
+func appOnlyToolName(name string) bool {
+	switch name {
+	case "setup_status", "setup_ui_switch_project":
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizeStateKey(value string) string {

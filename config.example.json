@@ -28,6 +28,8 @@
   "skills": {
     "enabled": true,
     "includeUser": true,
+    "includePlugins": true,
+    "claudePlugins": false,
     "dirs": []
   },
   "projectDoc": {
@@ -56,8 +58,15 @@
     "maxReferences": 64,
     "referenceTtl": "5m"
   },
+  "agentChat": {
+    "enabled": false,
+    "maxWaitMs": 55000
+  },
+  "experimental": {
+    "agentTickets": false
+  },
   "tunnel": {
-    "executable": "${USERPROFILE}\\.codexify\\openai-tunnel\\v0.0.12\\tunnel-client-runtime.exe",
+    "managedDir": ".codexify-go/openai-tunnel",
     "tunnelId": "tunnel_REPLACE_ME",
     "apiKeyRef": "file:C:\\path\\to\\tunnel.key",
     "mcpServerUrl": "http://127.0.0.1:3300/mcp/tunnel_REPLACE_ME",

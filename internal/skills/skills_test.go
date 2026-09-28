@@ -26,7 +26,8 @@ func TestListAndReadSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader := New(config.SkillsConfig{Enabled: true, IncludeUser: false})
+	includePlugins := false
+	reader := New(config.SkillsConfig{Enabled: true, IncludeUser: false, IncludePlugins: &includePlugins})
 	catalog, err := reader.List(project)
 	if err != nil {
 		t.Fatal(err)

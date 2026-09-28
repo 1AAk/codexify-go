@@ -111,6 +111,17 @@ func (r *Reader) List(workDir string) (Catalog, error) {
 		}
 	}
 
+	pluginSkills, pluginWarnings := r.discoverPluginSkills(workDir)
+	for _, skill := range pluginSkills {
+		key := strings.ToLower(skill.Name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		skills = append(skills, skill)
+	}
+	warnings = append(warnings, pluginWarnings...)
+
 	sort.Slice(skills, func(i, j int) bool {
 		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
 	})
@@ -244,6 +255,9 @@ func (r *Reader) roots(workDir string) []root {
 	for _, base := range projectRoots {
 		add(filepath.Join(base, ".agents", "skills"), "repo")
 		add(filepath.Join(base, ".codex", "skills"), "repo")
+		if r.cfg.ClaudePlugins {
+			add(filepath.Join(base, ".claude", "skills"), "repo")
+		}
 	}
 
 	for _, dir := range r.cfg.Dirs {
@@ -255,6 +269,9 @@ func (r *Reader) roots(workDir string) []root {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			add(filepath.Join(home, ".agents", "skills"), "user")
 			add(filepath.Join(home, ".codex", "skills"), "user")
+			if r.cfg.ClaudePlugins {
+				add(filepath.Join(home, ".claude", "skills"), "user")
+			}
 		}
 	}
 	r.mu.RLock()

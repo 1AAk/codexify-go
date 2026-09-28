@@ -16,9 +16,13 @@ type Factory struct {
 
 func (f *Factory) Start(ctx context.Context) (supervisor.Process, error) {
 	_ = os.Remove(f.Config.Tunnel.HealthURLFile)
+	executable, err := ResolveExecutable(ctx, f.Config.Tunnel)
+	if err != nil {
+		return nil, err
+	}
 	cf := supervisor.CommandFactory{
 		Spec: supervisor.CommandSpec{
-			Path: f.Config.Tunnel.Executable,
+			Path: executable,
 			Args: f.Config.TunnelArgs(),
 			Env:  f.Config.Tunnel.Environment,
 		},
