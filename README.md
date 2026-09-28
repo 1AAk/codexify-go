@@ -39,7 +39,15 @@ Implemented:
 - `read_file` / `write_file`;
 - recursive `glob` and regex `grep`;
 - `exec_command` with long-running sessions and `write_stdin`;
-- `git_status`, `git_diff`, and `git_log`.
+- `git_status`, `git_diff`, and `git_log`;
+- Windows user-context worker launched from the SCM service with
+  `CreateProcessAsUser`;
+- active WTS session discovery (console or RDP-compatible active session);
+- worker Job Object with `KILL_ON_JOB_CLOSE`, so worker child processes do not
+  survive service shutdown;
+- independent worker and tunnel supervision/restart loops;
+- MCP tools and shell commands execute as the logged-in user rather than
+  `LocalSystem`.
 
 Not implemented yet:
 
@@ -51,17 +59,21 @@ Not implemented yet:
 - automatic download/update of `tunnel-client-runtime`;
 - self-update.
 
-The Phase 2 MCP core has been exercised with both raw MCP requests and the
-official Go MCP client. An end-to-end Windows SCM smoke test also verifies:
+The MCP core has been exercised with both raw MCP requests and the official Go
+MCP client. The Phase 3 end-to-end Windows SCM smoke test verifies:
 
 ```text
 Windows SCM
-  -> codexify-go MCP server
-  -> generated internal bearer auth
-  -> fake tunnel runtime
-  -> child kill
-  -> supervised restart
-  -> MCP re-authentication
+  -> SYSTEM supervisor
+       |-> tunnel runtime
+       |-> FOXOS\FoxOS_User worker
+             -> MCP server
+             -> exec_command whoami == foxos\foxos_user
+             -> long-running shell child
+
+worker kill  -> worker restarts as FOXOS\FoxOS_User
+tunnel kill  -> tunnel restarts and re-authenticates to MCP
+service stop -> worker + tunnel + long-running shell child are all gone
 ```
 
 ## Build
@@ -130,17 +142,21 @@ Removal:
 The service is deliberately named `CodexifyGo` by default so it does not touch
 or conflict with an installed Rust Codexify service.
 
-## Important service-account limitation
+## Windows identity model
 
-SCM services run outside the logged-in desktop session. The MCP core now runs
-inside the service, so filesystem tools work, but `exec_command` and Git also
-run as the service account (currently LocalSystem). That is intentionally **not
-yet considered a drop-in replacement** for the Rust Codexify service: Git
-Credential Manager state, SSH agents, DPAPI secrets and other per-user resources
-belong to the user session.
+The durable SCM service runs as `LocalSystem`, but developer-facing MCP tools do
+not. The service discovers an active interactive WTS session, obtains that
+session's user token, and starts `codexify-go worker run` with
+`CreateProcessAsUser`. The worker receives the ephemeral MCP bearer through its
+user environment and owns the MCP HTTP server, filesystem tools, Git and exec
+sessions.
 
-The next lifecycle milestone is therefore a small authenticated user-context
-worker controlled by the SCM supervisor. Until that exists, keep the current
-Rust Codexify installation for real developer workflows.
+If no interactive user is logged in, the Windows service remains alive and the
+worker supervisor retries with bounded backoff until an active session appears.
+
+This removes the main LocalSystem limitation from Phase 2. Remaining gaps versus
+the Rust Codexify implementation are primarily product/workspace features such
+as multi-project conversation binding, worktrees, upstream MCP aggregation,
+skills/memory and artifact/UI support.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).

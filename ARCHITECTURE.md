@@ -11,25 +11,33 @@ Scheduled Task on Windows. `codexify-go` starts from a different boundary:
 Windows SCM owns the durable supervisor, and child runtimes are explicitly
 monitored.
 
-## Current topology (Phase 1 + Phase 2)
+## Current topology (Phase 1 + Phase 2 + Phase 3)
 
 ```text
 Windows SCM
     |
     v
-codexify-go.exe service run
+codexify-go.exe service run (LocalSystem)
     |
     +-- structured logger
     |
-    +-- Streamable HTTP MCP server
+    +-- user-worker supervisor
     |     |
+    |     +-- discover active WTS session
+    |     +-- CreateProcessAsUser
+    |     +-- kill-on-close Job Object
+    |     |
+    |     v
+    |   codexify-go.exe worker run (interactive user)
+    |     |
+    |     +-- Streamable HTTP MCP server
     |     +-- generated internal bearer auth
     |     +-- workspace confinement
     |     +-- filesystem/search tools
     |     +-- exec session manager
     |     +-- Git tools
     |
-    +-- supervisor
+    +-- tunnel supervisor
           |
           +-- start tunnel-client-runtime.exe
           +-- monitor process exit
@@ -39,11 +47,13 @@ codexify-go.exe service run
           +-- terminate process tree on shutdown
 ```
 
-There are two independent recovery layers:
+There are three independent recovery layers:
 
 1. **SCM recovery** restarts `codexify-go.exe` if the supervisor itself dies.
-2. **Internal supervision** restarts only `tunnel-client-runtime.exe` if the
-   child exits or becomes unhealthy.
+2. **Worker supervision** restarts only the user-context MCP worker if it exits
+   or its `/health` endpoint becomes unhealthy.
+3. **Tunnel supervision** restarts only `tunnel-client-runtime.exe` if the
+   tunnel child exits or becomes unhealthy.
 
 This prevents a tunnel failure from unnecessarily restarting the whole agent.
 
@@ -84,10 +94,11 @@ The tunnel health URL file contains a loopback base URL. The supervisor appends
 `/readyz` and rejects non-loopback health URLs.
 
 The local MCP endpoint is also restricted to an explicit loopback HTTP URL.
-When authentication is enabled, the parent generates a random bearer on every
-start, injects it into the tunnel process environment, and configures the
-tunnel's local `Authorization` header through an `env:` reference. The bearer
-does not live in the JSON configuration.
+When authentication is enabled, the SYSTEM parent generates a random bearer on
+every start. The same bearer is injected independently into the user worker and
+the tunnel runtime through their environment blocks. The tunnel's local
+`Authorization` header uses an `env:` reference, while the worker validates the
+corresponding bearer. The secret never lives in the JSON configuration.
 
 ## MCP protocol
 
@@ -108,24 +119,32 @@ All path-taking tools resolve against one configured workspace root. Absolute
 paths and `..` escapes are rejected, and symlink resolution is checked against
 the canonical root before access.
 
-## Windows process model
+## Windows process and identity model
 
-Child processes are created with `CREATE_NO_WINDOW` and
+Tunnel children are created with `CREATE_NO_WINDOW` and
 `CREATE_NEW_PROCESS_GROUP`. This avoids terminal popups.
+
+The MCP worker is different: the SCM process discovers an active WTS session,
+obtains the logged-in user's token with `WTSQueryUserToken`, builds that user's
+environment block, and launches the worker with `CreateProcessAsUser` in a
+suspended state. Before resuming it, the parent assigns the worker to a Windows
+Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+
+This ordering matters: shell commands and other descendants spawned immediately
+by the worker are born inside the Job Object and cannot escape supervision. A
+service stop or worker replacement therefore removes the complete worker
+process tree.
 
 On stop, the supervisor first asks Windows to terminate the process tree without
 force. Some console-less children cannot be terminated this way; Windows
 returns an error in that case. The supervisor then uses forced process-tree
 termination rather than leaving an orphan.
 
-Longer term this can be strengthened with a Windows Job Object owned directly
-by the supervisor.
-
 ## Identity boundary
 
-Running the full developer agent as LocalSystem would be convenient for
-lifecycle but incorrect for many developer workflows. User-scoped resources
-include:
+The durable lifecycle layer remains `LocalSystem`, while developer operations
+run in the active user's session. This preserves access to user-scoped resources
+such as:
 
 - Git Credential Manager / DPAPI state;
 - SSH agents and keys;
@@ -133,32 +152,13 @@ include:
 - mapped drives;
 - profile-specific CLI configuration.
 
-Planned full architecture:
-
-```text
-Windows SCM supervisor (system context)
-    |
-    +-- tunnel runtime
-    |
-    +-- user-session worker
-          |
-          +-- MCP HTTP server
-          +-- filesystem tools
-          +-- exec sessions
-          +-- Git
-          +-- upstream MCP bridges
-          +-- project/worktree state
-```
-
-The exact authenticated IPC and user-session launch mechanism is intentionally
-deferred until the MCP core is implemented and tested.
+The Phase 3 smoke test verifies both process ownership (`FOXOS\FoxOS_User`) and
+tool identity (`exec_command whoami` returns `foxos\foxos_user`).
 
 ## Roadmap
 
-### Phase 3: user-context worker and workspace compatibility
+### Phase 3: workspace compatibility (remaining)
 
-- authenticated supervisor <-> user-worker IPC;
-- launch developer tools under the logged-in user rather than LocalSystem;
 - multi-project catalogue;
 - conversation binding;
 - safe project selection;
