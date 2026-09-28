@@ -66,12 +66,12 @@ MCP client. The Phase 3 end-to-end Windows SCM smoke test verifies:
 Windows SCM
   -> SYSTEM supervisor
        |-> tunnel runtime
-       |-> FOXOS\FoxOS_User worker
+       |-> <domain>\<interactive-user> worker
              -> MCP server
-             -> exec_command whoami == foxos\foxos_user
+             -> exec_command whoami == <domain>\<interactive-user>
              -> long-running shell child
 
-worker kill  -> worker restarts as FOXOS\FoxOS_User
+worker kill  -> worker restarts as the same interactive user
 tunnel kill  -> tunnel restarts and re-authenticates to MCP
 service stop -> worker + tunnel + long-running shell child are all gone
 ```

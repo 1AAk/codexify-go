@@ -152,8 +152,9 @@ such as:
 - mapped drives;
 - profile-specific CLI configuration.
 
-The Phase 3 smoke test verifies both process ownership (`FOXOS\FoxOS_User`) and
-tool identity (`exec_command whoami` returns `foxos\foxos_user`).
+The Phase 3 smoke test verifies both process ownership and tool identity against
+the currently active interactive Windows user, without relying on a hard-coded
+account name or profile path.
 
 ## Roadmap
 
