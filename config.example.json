@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "log": {
+    "file": ".codexify-go/codexify-go.log",
+    "level": "info"
+  },
+  "service": {
+    "name": "CodexifyGo",
+    "displayName": "Codexify Go",
+    "description": "Native Windows supervisor for Codexify-compatible MCP and OpenAI tunnel runtime."
+  },
+  "tunnel": {
+    "executable": "${USERPROFILE}\\.codexify\\openai-tunnel\\v0.0.12\\tunnel-client-runtime.exe",
+    "tunnelId": "tunnel_REPLACE_ME",
+    "apiKeyRef": "file:C:\\path\\to\\tunnel.key",
+    "mcpServerUrl": "http://127.0.0.1:3300/mcp/tunnel_REPLACE_ME",
+    "startupWaitTimeout": "15s",
+    "healthUrlFile": ".codexify-go/tunnel-health.url",
+    "environment": {},
+    "extraArgs": []
+  },
+  "supervisor": {
+    "minBackoff": "2s",
+    "maxBackoff": "1m",
+    "stableWindow": "1m",
+    "healthInterval": "5s",
+    "healthFailureThreshold": 3,
+    "shutdownTimeout": "10s"
+  }
+}
