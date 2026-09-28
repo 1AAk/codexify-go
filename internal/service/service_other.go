@@ -25,5 +25,5 @@ func Stop(string) error                           { return unsupported() }
 func Restart(string) error                        { return unsupported() }
 func Remove(string) error                         { return unsupported() }
 func Query(string) (Status, error)                { return Status{}, unsupported() }
-func Run(string, config.Config) error             { return unsupported() }
+func Run(string, config.Config, string) error     { return unsupported() }
 func ExecutablePath() (string, error)             { return "", unsupported() }

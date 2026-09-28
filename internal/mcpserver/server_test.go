@@ -46,7 +46,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 	_, env := r.TunnelEnvironment()
 	req = httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", bytes.NewBufferString("{}"))
-	req.Header.Set("Authorization", env[internalAuthEnv])
+	req.Header.Set("Authorization", env[InternalAuthEnv])
 	rec = httptest.NewRecorder()
 	r.Handler().ServeHTTP(rec, req)
 	if rec.Code == http.StatusUnauthorized {

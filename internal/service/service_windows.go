@@ -165,7 +165,7 @@ func Query(name string) (Status, error) {
 	return Status{Installed: true, State: st.State}, nil
 }
 
-func Run(name string, cfg config.Config) error {
+func Run(name string, cfg config.Config, configPath string) error {
 	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return err
@@ -173,11 +173,12 @@ func Run(name string, cfg config.Config) error {
 	if !isService {
 		return errors.New("service run must be started by Windows Service Control Manager")
 	}
-	return svc.Run(name, &handler{cfg: cfg})
+	return svc.Run(name, &handler{cfg: cfg, configPath: configPath})
 }
 
 type handler struct {
-	cfg config.Config
+	cfg        config.Config
+	configPath string
 }
 
 func (h *handler) Execute(_ []string, changes <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
@@ -187,7 +188,7 @@ func (h *handler) Execute(_ []string, changes <-chan svc.ChangeRequest, status c
 
 	done := make(chan error, 1)
 	go func() {
-		done <- app.Run(ctx, h.cfg, false)
+		done <- app.Run(ctx, h.cfg, h.configPath, false)
 	}()
 
 	status <- svc.Status{

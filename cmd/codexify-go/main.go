@@ -13,10 +13,11 @@ import (
 	"github.com/benice2me11/codexify-go/internal/app"
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/service"
+	"github.com/benice2me11/codexify-go/internal/worker"
 	"github.com/benice2me11/codexify-go/internal/workspace"
 )
 
-const version = "0.2.0-dev"
+const version = "0.3.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -40,6 +41,8 @@ func run(args []string) error {
 		return doctor(args[1:])
 	case "service":
 		return serviceCommand(args[1:])
+	case "worker":
+		return workerCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -57,7 +60,25 @@ func runForeground(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return app.Run(ctx, cfg, true)
+	return app.Run(ctx, cfg, mustAbs(*path), true)
+}
+
+func workerCommand(args []string) error {
+	if len(args) == 0 || args[0] != "run" {
+		return errors.New("worker subcommand required: run")
+	}
+	fs := flag.NewFlagSet("worker run", flag.ContinueOnError)
+	path := fs.String("config", "config.json", "config file")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return worker.Run(ctx, cfg, false)
 }
 
 func doctor(args []string) error {
@@ -136,7 +157,7 @@ func serviceCommand(args []string) error {
 		fmt.Println("installed; state:", service.StateString(st.State))
 		return nil
 	case "run":
-		return service.Run(cfg.Service.Name, cfg)
+		return service.Run(cfg.Service.Name, cfg, mustAbs(*path))
 	default:
 		return fmt.Errorf("unknown service subcommand %q", sub)
 	}
@@ -157,6 +178,7 @@ Usage:
   codexify-go run --config config.json
   codexify-go doctor --config config.json
   codexify-go service install|start|stop|restart|remove|status --config config.json
+  codexify-go worker run --config config.json
   codexify-go version
 `)
 }

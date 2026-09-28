@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
 	"runtime"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const internalAuthEnv = "CODEXIFY_GO_INTERNAL_MCP_AUTHORIZATION"
+const InternalAuthEnv = "CODEXIFY_GO_INTERNAL_MCP_AUTHORIZATION"
 
 type Runtime struct {
 	cfg      config.Config
@@ -37,6 +38,10 @@ type Runtime struct {
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*Runtime, error) {
+	return NewWithToken(cfg, logger, "")
+}
+
+func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtime, error) {
 	root, err := workspace.New(cfg.MCP.WorkspaceRoot)
 	if err != nil {
 		return nil, err
@@ -53,12 +58,13 @@ func New(cfg config.Config, logger *slog.Logger) (*Runtime, error) {
 		logger = slog.Default()
 	}
 
-	token := ""
 	if cfg.MCP.AuthEnabled {
-		token, err = randomToken()
-		if err != nil {
-			ln.Close()
-			return nil, err
+		if token == "" {
+			token, err = GenerateToken()
+			if err != nil {
+				ln.Close()
+				return nil, err
+			}
 		}
 	}
 
@@ -72,7 +78,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Runtime, error) {
 	}
 	r.server = mcp.NewServer(&mcp.Implementation{
 		Name:    "codexify-go",
-		Version: "0.2.0-dev",
+		Version: "0.3.0-dev",
 	}, &mcp.ServerOptions{Logger: logger})
 	r.registerTools()
 
@@ -118,8 +124,17 @@ func (r *Runtime) TunnelEnvironment() (string, map[string]string) {
 	if !r.cfg.MCP.AuthEnabled {
 		return "", nil
 	}
-	return "env:" + internalAuthEnv, map[string]string{
-		internalAuthEnv: "Bearer " + r.token,
+	return "env:" + InternalAuthEnv, map[string]string{
+		InternalAuthEnv: "Bearer " + r.token,
+	}
+}
+
+func AuthEnvironment(token string) (string, map[string]string) {
+	if token == "" {
+		return "", nil
+	}
+	return "env:" + InternalAuthEnv, map[string]string{
+		InternalAuthEnv: "Bearer " + token,
 	}
 }
 
@@ -139,10 +154,15 @@ func (r *Runtime) registerTools() {
 		if runtime.GOOS == "windows" {
 			shell = "powershell"
 		}
+		username := "unknown"
+		if current, err := user.Current(); err == nil {
+			username = current.Username
+		}
 		return nil, EnvironmentOutput{
 			Platform:      runtime.GOOS + "/" + runtime.GOARCH,
 			WorkspaceRoot: r.root.Path(),
 			DefaultShell:  shell,
+			Username:      username,
 		}, nil
 	})
 
@@ -219,6 +239,7 @@ type EnvironmentOutput struct {
 	Platform      string `json:"platform"`
 	WorkspaceRoot string `json:"workspaceRoot"`
 	DefaultShell  string `json:"defaultShell"`
+	Username      string `json:"username"`
 }
 
 type ExecCommandInput struct {
@@ -327,7 +348,7 @@ func endpointFromURL(raw string) (endpoint, listen string, err error) {
 	return endpoint, u.Host, nil
 }
 
-func randomToken() (string, error) {
+func GenerateToken() (string, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate MCP auth token: %w", err)
@@ -354,4 +375,24 @@ func RedactedEndpoint(raw string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimSuffix(u.String(), "/")
+}
+
+func HealthURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "http" {
+		return "", errors.New("MCP URL must use http")
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return "", fmt.Errorf("MCP URL must use loopback, got %q", host)
+	}
+	u.Path = "/health"
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
