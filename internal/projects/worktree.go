@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/benice2me11/codexify-go/internal/workspace"
 )
 
 type ManagedWorktree struct {
@@ -36,7 +38,7 @@ func gitTopLevel(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Clean(strings.TrimSpace(string(out))), nil
+	return workspace.Canonical(strings.TrimSpace(string(out)))
 }
 
 func (m *Manager) createManagedWorktree(identity *Identity, selected, gitRoot string) (ManagedWorktree, error) {
@@ -112,7 +114,13 @@ func (m *Manager) ListWorktrees(meta map[string]any) (WorktreeListOutput, error)
 		if current.Path == "" {
 			return
 		}
-		if rel, err := filepath.Rel(m.cfg.Worktrees.Root, current.Path); err == nil && !strings.HasPrefix(rel, "..") {
+		managedRoot, rootErr := workspace.Canonical(m.cfg.Worktrees.Root)
+		currentPath, pathErr := workspace.Canonical(current.Path)
+		if rootErr == nil && pathErr == nil {
+			if rel, err := filepath.Rel(managedRoot, currentPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				current.Managed = true
+			}
+		} else if rel, err := filepath.Rel(m.cfg.Worktrees.Root, current.Path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			current.Managed = true
 		}
 		rows = append(rows, current)

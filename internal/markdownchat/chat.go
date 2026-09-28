@@ -19,6 +19,7 @@ import (
 
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/projects"
+	"github.com/benice2me11/codexify-go/internal/workspace"
 )
 
 const (
@@ -508,13 +509,13 @@ func privateDir(path string) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
+	resolved, err := workspace.Canonical(abs)
 	if err != nil {
 		return err
 	}
-	if filepath.Clean(resolved) != filepath.Clean(abs) {
-		return errors.New("Markdown chat directory resolves through a symlink/reparse point")
-	}
+	// Canonical OS aliases such as macOS /var -> /private/var are accepted.
+	// The directory itself is still rejected above when it is a symlink.
+	_ = resolved
 	return nil
 }
 

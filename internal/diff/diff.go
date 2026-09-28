@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/benice2me11/codexify-go/internal/config"
+	workspacepkg "github.com/benice2me11/codexify-go/internal/workspace"
 )
 
 const (
@@ -343,17 +344,15 @@ func (s *transientCheckpoint) objectEnv() map[string]string {
 }
 
 func resolveWorkspace(workDir string) (workspace, error) {
-	projectRoot, err := filepath.Abs(workDir)
+	projectRoot, err := workspacepkg.Canonical(workDir)
 	if err != nil {
 		return workspace{}, err
 	}
-	projectRoot = filepath.Clean(projectRoot)
 	out, err := gitChecked(projectRoot, []string{"rev-parse", "--show-toplevel"}, nil, nil)
 	if err != nil {
 		return workspace{}, fmt.Errorf("%w: %v", ErrNotGitWorktree, err)
 	}
-	gitRoot := filepath.Clean(strings.TrimSpace(string(out)))
-	gitRoot, err = filepath.Abs(gitRoot)
+	gitRoot, err := workspacepkg.Canonical(strings.TrimSpace(string(out)))
 	if err != nil {
 		return workspace{}, err
 	}

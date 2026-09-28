@@ -4,24 +4,18 @@ package supervisor
 
 import (
 	"context"
-	"os"
 	"os/exec"
+	"syscall"
 )
 
-func configureProcess(cmd *exec.Cmd) {}
+func configureProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
 
 func stopProcessTree(ctx context.Context, pid int) error {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return p.Signal(os.Interrupt)
+	return syscall.Kill(-pid, syscall.SIGINT)
 }
 
 func forceKillProcessTree(pid int) error {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return p.Kill()
+	return syscall.Kill(-pid, syscall.SIGKILL)
 }

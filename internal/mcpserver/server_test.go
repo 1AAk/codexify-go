@@ -695,7 +695,11 @@ func TestMarkdownChatOverMCP(t *testing.T) {
 		t.Fatalf("brief missing chat section: err=%v result=%+v", err, brief)
 	}
 	identity := projects.IdentityFromMeta(map[string]any{"openai/session": "markdown-chat-conversation"})
-	chatPath, err := r.chat.Path(projectRoot, identity)
+	selectedRoot, _, err := r.projects.Workspace(map[string]any{"openai/session": "markdown-chat-conversation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatPath, err := r.chat.Path(selectedRoot.Path(), identity)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -251,6 +251,11 @@ func updateCommand(args []string) error {
 		if helper != "" && helper != target {
 			fmt.Println("update helper:", helper)
 		}
+		if restartService && helper == target {
+			if err := service.Start(cfg.Service.Name); err != nil {
+				return fmt.Errorf("restart service after update: %w", err)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown update subcommand %q", sub)

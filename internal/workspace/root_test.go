@@ -28,7 +28,10 @@ func TestResolveMissingChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(root, "a", "b", "file.txt")
+	want, err := Canonical(filepath.Join(root, "a", "b", "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if filepath.Clean(got) != filepath.Clean(want) {
 		t.Fatalf("got %q want %q", got, want)
 	}

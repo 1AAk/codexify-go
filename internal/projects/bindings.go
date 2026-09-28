@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/benice2me11/codexify-go/internal/workspace"
 )
 
 const (
@@ -172,5 +174,9 @@ func (m *Manager) sourceInUse(source string, identity *Identity) bool {
 }
 
 func cleanComparable(path string) string {
+	canonical, err := workspace.Canonical(path)
+	if err == nil {
+		return strings.ToLower(canonical)
+	}
 	return strings.ToLower(filepath.Clean(path))
 }

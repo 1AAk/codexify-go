@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/benice2me11/codexify-go/internal/config"
+	"github.com/benice2me11/codexify-go/internal/workspace"
 )
 
 func TestConversationBindingPersistsWithoutRawSession(t *testing.T) {
@@ -42,7 +43,11 @@ func TestConversationBindingPersistsWithoutRawSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Path() != project || info.ProjectRoot != project {
+	projectCanonical, err := workspace.Canonical(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Path() != projectCanonical || info.ProjectRoot != projectCanonical {
 		t.Fatalf("workspace mismatch: %s %+v", resolved.Path(), info)
 	}
 
@@ -63,7 +68,7 @@ func TestConversationBindingPersistsWithoutRawSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved2.Path() != project {
+	if resolved2.Path() != projectCanonical {
 		t.Fatalf("persisted binding resolved to %q", resolved2.Path())
 	}
 }
@@ -118,8 +123,13 @@ func TestAutoModeCreatesWorktreeWhenProjectAlreadyInUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	foundManaged := false
+	secondWorktreeCanonical, err := workspace.Canonical(second.WorktreeGitRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, wt := range listed.Worktrees {
-		if filepath.Clean(wt.Path) == filepath.Clean(second.WorktreeGitRoot) && wt.Managed {
+		wtCanonical, canonicalErr := workspace.Canonical(wt.Path)
+		if canonicalErr == nil && wtCanonical == secondWorktreeCanonical && wt.Managed {
 			foundManaged = true
 		}
 	}
@@ -270,7 +280,11 @@ func TestRepositoryURLReusesMatchingCheckout(t *testing.T) {
 	if selected.Cloned {
 		t.Fatal("matching local checkout should be reused rather than cloned")
 	}
-	if filepath.Clean(selected.SourceProjectRoot) != filepath.Clean(repo) {
+	repoCanonical, err := workspace.Canonical(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(selected.SourceProjectRoot) != filepath.Clean(repoCanonical) {
 		t.Fatalf("source = %q want %q", selected.SourceProjectRoot, repo)
 	}
 	if selected.RepositoryURL != "https://github.com/example/reusable" {

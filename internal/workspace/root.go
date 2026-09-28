@@ -13,6 +13,45 @@ type Root struct {
 	real string
 }
 
+func Canonical(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	ancestor := abs
+	var suffix []string
+	for {
+		if _, statErr := os.Lstat(ancestor); statErr == nil {
+			break
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", err
+		}
+		suffix = append([]string{filepath.Base(ancestor)}, suffix...)
+		ancestor = parent
+	}
+	realAncestor, evalErr := filepath.EvalSymlinks(ancestor)
+	if evalErr != nil {
+		return "", evalErr
+	}
+	out := realAncestor
+	for _, part := range suffix {
+		out = filepath.Join(out, part)
+	}
+	return filepath.Clean(out), nil
+}
+
 func New(path string) (*Root, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("workspace root is empty")
@@ -28,11 +67,12 @@ func New(path string) (*Root, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace root is not a directory: %s", abs)
 	}
-	real, err := filepath.EvalSymlinks(abs)
+	real, err := Canonical(abs)
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace root symlinks: %w", err)
 	}
-	return &Root{path: filepath.Clean(abs), real: filepath.Clean(real)}, nil
+	real = filepath.Clean(real)
+	return &Root{path: real, real: real}, nil
 }
 
 func (r *Root) Path() string { return r.path }
