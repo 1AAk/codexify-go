@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func TestStopProcessTreeKillsGrandchild(t *testing.T) {
+func TestForceKillProcessTreeKillsGrandchild(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", "sleep 300 & child=$!; echo $child; wait")
 	configureProcess(cmd)
 	out, err := cmd.StdoutPipe()
@@ -28,9 +28,7 @@ func TestStopProcessTreeKillsGrandchild(t *testing.T) {
 		t.Fatal(err)
 	}
 	child := readPID(t, out)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := stopProcessTree(ctx, cmd.Process.Pid); err != nil {
+	if err := forceKillProcessTree(cmd.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
