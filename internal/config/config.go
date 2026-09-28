@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +34,7 @@ type Config struct {
 	Version    int              `json:"version"`
 	Log        LogConfig        `json:"log"`
 	Service    ServiceConfig    `json:"service"`
+	MCP        MCPConfig        `json:"mcp"`
 	Tunnel     TunnelConfig     `json:"tunnel"`
 	Supervisor SupervisorConfig `json:"supervisor"`
 }
@@ -45,6 +48,12 @@ type ServiceConfig struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName"`
 	Description string `json:"description"`
+}
+
+type MCPConfig struct {
+	WorkspaceRoot       string `json:"workspaceRoot"`
+	AuthEnabled         bool   `json:"authEnabled"`
+	MaxRequestBodyBytes int64  `json:"maxRequestBodyBytes"`
 }
 
 type TunnelConfig struct {
@@ -80,6 +89,11 @@ func Default() Config {
 			Name:        "CodexifyGo",
 			DisplayName: "Codexify Go",
 			Description: "Native Windows supervisor for Codexify-compatible MCP and OpenAI tunnel runtime.",
+		},
+		MCP: MCPConfig{
+			WorkspaceRoot:       ".",
+			AuthEnabled:         true,
+			MaxRequestBodyBytes: 4 << 20,
 		},
 		Tunnel: TunnelConfig{
 			StartupWaitTimeout: Duration(15 * time.Second),
@@ -127,6 +141,7 @@ func (c *Config) expand(base string) {
 		return filepath.Clean(filepath.Join(base, v))
 	}
 	c.Log.File = expand(c.Log.File)
+	c.MCP.WorkspaceRoot = expand(c.MCP.WorkspaceRoot)
 	c.Tunnel.Executable = expand(c.Tunnel.Executable)
 	c.Tunnel.HealthURLFile = expand(c.Tunnel.HealthURLFile)
 	c.Tunnel.APIKeyRef = expandReference(c.Tunnel.APIKeyRef, base)
@@ -160,6 +175,12 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Service.Name) == "" {
 		errs = append(errs, errors.New("service.name is required"))
 	}
+	if strings.TrimSpace(c.MCP.WorkspaceRoot) == "" {
+		errs = append(errs, errors.New("mcp.workspaceRoot is required"))
+	}
+	if c.MCP.MaxRequestBodyBytes <= 0 {
+		errs = append(errs, errors.New("mcp.maxRequestBodyBytes must be > 0"))
+	}
 	if strings.TrimSpace(c.Tunnel.Executable) == "" {
 		errs = append(errs, errors.New("tunnel.executable is required"))
 	}
@@ -171,6 +192,8 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Tunnel.MCPServerURL) == "" {
 		errs = append(errs, errors.New("tunnel.mcpServerUrl is required"))
+	} else if err := validateMCPServerURL(c.Tunnel.MCPServerURL); err != nil {
+		errs = append(errs, err)
 	}
 	if c.Supervisor.MinBackoff.Duration() <= 0 {
 		errs = append(errs, errors.New("supervisor.minBackoff must be > 0"))
@@ -191,6 +214,25 @@ func (c Config) Validate() error {
 		errs = append(errs, errors.New("supervisor.shutdownTimeout must be > 0"))
 	}
 	return errors.Join(errs...)
+}
+
+func validateMCPServerURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("tunnel.mcpServerUrl: %w", err)
+	}
+	if u.Scheme != "http" {
+		return errors.New("tunnel.mcpServerUrl must use http")
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("tunnel.mcpServerUrl must use a loopback host, got %q", host)
+	}
+	if u.Port() == "" {
+		return errors.New("tunnel.mcpServerUrl must include an explicit port")
+	}
+	return nil
 }
 
 func (c Config) TunnelArgs() []string {

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/health"
+	"github.com/benice2me11/codexify-go/internal/mcpserver"
 	"github.com/benice2me11/codexify-go/internal/supervisor"
 	"github.com/benice2me11/codexify-go/internal/tunnel"
 )
@@ -49,6 +51,16 @@ func Run(ctx context.Context, cfg config.Config, console bool) error {
 		"tunnel_executable", cfg.Tunnel.Executable,
 	)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	mcpRuntime, err := mcpserver.New(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("start MCP runtime: %w", err)
+	}
+	authRef, authEnv := mcpRuntime.TunnelEnvironment()
+	mcpserver.MergeTunnelEnvironment(&cfg, authRef, authEnv)
+
 	factory := &tunnel.Factory{Config: cfg, Output: logFile}
 	checker := health.NewURLFileChecker(cfg.Tunnel.HealthURLFile)
 	s := &supervisor.Supervisor{
@@ -65,10 +77,58 @@ func Run(ctx context.Context, cfg config.Config, console bool) error {
 		},
 		Log: logger,
 	}
-	err = s.Run(ctx)
-	if err != nil {
-		logger.Error("supervisor stopped with error", "error", err)
-		return err
+
+	mcpErr := make(chan error, 1)
+	go func() { mcpErr <- mcpRuntime.Serve() }()
+	supervisorErr := make(chan error, 1)
+	go func() { supervisorErr <- s.Run(runCtx) }()
+
+	var runErr error
+	supervisorFinished := false
+	mcpFinished := false
+	select {
+	case <-ctx.Done():
+	case err := <-mcpErr:
+		mcpFinished = true
+		if err != nil {
+			runErr = fmt.Errorf("MCP server stopped: %w", err)
+		}
+	case err := <-supervisorErr:
+		supervisorFinished = true
+		if err != nil {
+			runErr = fmt.Errorf("tunnel supervisor stopped: %w", err)
+		}
+	}
+	cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Supervisor.ShutdownTimeout.Duration())
+	defer shutdownCancel()
+	if err := mcpRuntime.Shutdown(shutdownCtx); err != nil && runErr == nil {
+		runErr = fmt.Errorf("shutdown MCP server: %w", err)
+	}
+	if !supervisorFinished {
+		select {
+		case err := <-supervisorErr:
+			if err != nil && runErr == nil {
+				runErr = fmt.Errorf("shutdown tunnel supervisor: %w", err)
+			}
+		case <-shutdownCtx.Done():
+			if runErr == nil {
+				runErr = errors.New("timed out waiting for tunnel supervisor shutdown")
+			}
+		}
+	}
+	if !mcpFinished {
+		select {
+		case err := <-mcpErr:
+			if err != nil && runErr == nil {
+				runErr = fmt.Errorf("MCP server shutdown: %w", err)
+			}
+		default:
+		}
+	}
+	if runErr != nil {
+		logger.Error("codexify-go stopped with error", "error", runErr)
+		return runErr
 	}
 	logger.Info("codexify-go stopped")
 	return nil

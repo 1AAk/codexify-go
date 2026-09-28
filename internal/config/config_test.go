@@ -44,3 +44,27 @@ func TestLoadMakesRelativePathsConfigRelativeAndAbsolute(t *testing.T) {
 		t.Fatalf("api key ref got %q want %q", cfg.Tunnel.APIKeyRef, wantRef)
 	}
 }
+
+func TestValidateRejectsNonLoopbackMCPURL(t *testing.T) {
+	cfg := Default()
+	cfg.MCP.WorkspaceRoot = t.TempDir()
+	cfg.Tunnel.Executable = "tunnel.exe"
+	cfg.Tunnel.TunnelID = "tunnel_test"
+	cfg.Tunnel.APIKeyRef = "env:KEY"
+	cfg.Tunnel.MCPServerURL = "http://0.0.0.0:3300/mcp"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected non-loopback MCP URL to be rejected")
+	}
+}
+
+func TestValidateRejectsMCPURLWithoutPort(t *testing.T) {
+	cfg := Default()
+	cfg.MCP.WorkspaceRoot = t.TempDir()
+	cfg.Tunnel.Executable = "tunnel.exe"
+	cfg.Tunnel.TunnelID = "tunnel_test"
+	cfg.Tunnel.APIKeyRef = "env:KEY"
+	cfg.Tunnel.MCPServerURL = "http://127.0.0.1/mcp"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected MCP URL without explicit port to be rejected")
+	}
+}

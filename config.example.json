@@ -9,6 +9,11 @@
     "displayName": "Codexify Go",
     "description": "Native Windows supervisor for Codexify-compatible MCP and OpenAI tunnel runtime."
   },
+  "mcp": {
+    "workspaceRoot": "${USERPROFILE}\\codexify-go-workspace",
+    "authEnabled": true,
+    "maxRequestBodyBytes": 4194304
+  },
   "tunnel": {
     "executable": "${USERPROFILE}\\.codexify\\openai-tunnel\\v0.0.12\\tunnel-client-runtime.exe",
     "tunnelId": "tunnel_REPLACE_ME",
