@@ -21,6 +21,24 @@
     "projects": [],
     "upstreams": []
   },
+  "memory": {
+    "enabled": true,
+    "maxBytes": 16384
+  },
+  "skills": {
+    "enabled": true,
+    "includeUser": true,
+    "dirs": []
+  },
+  "artifactEgress": {
+    "enabled": true,
+    "maxFileBytes": 104857600,
+    "snapshotMaxFileBytes": 104857600,
+    "maxSnapshotBytes": 5368709120,
+    "fallbackToSource": true,
+    "maxReferences": 64,
+    "referenceTtl": "5m"
+  },
   "tunnel": {
     "executable": "${USERPROFILE}\\.codexify\\openai-tunnel\\v0.0.12\\tunnel-client-runtime.exe",
     "tunnelId": "tunnel_REPLACE_ME",

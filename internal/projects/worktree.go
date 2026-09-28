@@ -40,6 +40,10 @@ func gitTopLevel(path string) (string, error) {
 }
 
 func (m *Manager) createManagedWorktree(identity *Identity, selected, gitRoot string) (ManagedWorktree, error) {
+	return m.createManagedWorktreeAt(identity, selected, gitRoot, "HEAD")
+}
+
+func (m *Manager) createManagedWorktreeAt(identity *Identity, selected, gitRoot, target string) (ManagedWorktree, error) {
 	if identity == nil {
 		return ManagedWorktree{}, errors.New("managed worktree requires conversation identity")
 	}
@@ -56,7 +60,10 @@ func (m *Manager) createManagedWorktree(identity *Identity, selected, gitRoot st
 	worktreeGitRoot := filepath.Join(parent, identity.Short()+"-"+suffix)
 	branch := "codexify-go/" + identity.Short() + "-" + suffix
 
-	cmd := exec.Command("git", "-C", gitRoot, "worktree", "add", "-b", branch, worktreeGitRoot, "HEAD")
+	if strings.TrimSpace(target) == "" {
+		target = "HEAD"
+	}
+	cmd := exec.Command("git", "-C", gitRoot, "worktree", "add", "-b", branch, worktreeGitRoot, target)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -87,6 +94,9 @@ func (m *Manager) ListWorktrees(meta map[string]any) (WorktreeListOutput, error)
 		return WorktreeListOutput{}, err
 	}
 	_ = root
+	if info.Mode == "scratch" || info.SourceProjectRoot == "" {
+		return WorktreeListOutput{}, errors.New("scratch workspace is not backed by a selected Git project")
+	}
 	gitRoot, err := gitTopLevel(info.SourceProjectRoot)
 	if err != nil {
 		return WorktreeListOutput{}, errors.New("selected project is not a Git repository")

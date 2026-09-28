@@ -21,11 +21,29 @@ type echoOutput struct {
 	Text string `json:"text"`
 }
 
+type emptyInput struct{}
+
+type resourceOutput struct {
+	OK bool `json:"ok"`
+}
+
 func TestBridgeCatalogAndDirectModes(t *testing.T) {
 	upstreamServer := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, nil)
 	mcp.AddTool(upstreamServer, &mcp.Tool{Name: "echo", Description: "echo text"},
 		func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
 			return nil, echoOutput{Text: in.Text}, nil
+		})
+	upstreamServer.AddResource(&mcp.Resource{URI: "fixture://document/1", Name: "fixture-document", MIMEType: "text/plain"},
+		func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+				URI: "fixture://document/1", MIMEType: "text/plain", Text: "bridged resource body",
+			}}}, nil
+		})
+	mcp.AddTool(upstreamServer, &mcp.Tool{Name: "resource_link", Description: "return a resource link"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, resourceOutput, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.ResourceLink{
+				URI: "fixture://document/1", Name: "fixture-document", MIMEType: "text/plain",
+			}}}, resourceOutput{OK: true}, nil
 		})
 	upstreamHTTP := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return upstreamServer },
@@ -38,7 +56,7 @@ func TestBridgeCatalogAndDirectModes(t *testing.T) {
 	bridge, err := ConnectAndRegister(context.Background(), []config.UpstreamMCPConfig{
 		{Name: "private", URL: upstreamHTTP.URL, Transport: "streamable_http", Mode: "catalog"},
 		{Name: "direct", URL: upstreamHTTP.URL, Transport: "streamable_http", Mode: "direct"},
-	}, downstream, logger, map[string]struct{}{})
+	}, downstream, logger, map[string]struct{}{}, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,13 +120,42 @@ func TestBridgeCatalogAndDirectModes(t *testing.T) {
 		t.Fatalf("catalog call failed: %+v", catalog.Content)
 	}
 	assertStructuredText(t, catalog.StructuredContent, "catalog works")
+
+	resourceCall, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "mcp_call_tool",
+		Arguments: map[string]any{
+			"source":    "private",
+			"name":      "resource_link",
+			"arguments": map[string]any{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var link *mcp.ResourceLink
+	for _, content := range resourceCall.Content {
+		if candidate, ok := content.(*mcp.ResourceLink); ok {
+			link = candidate
+			break
+		}
+	}
+	if link == nil || !strings.HasPrefix(link.URI, resourcePrefix) {
+		t.Fatalf("resource link was not rewritten: %+v", resourceCall.Content)
+	}
+	read, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: link.URI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Contents) != 1 || read.Contents[0].Text != "bridged resource body" || read.Contents[0].URI != link.URI {
+		t.Fatalf("unexpected bridged resource: %+v", read.Contents)
+	}
 }
 
 func TestOptionalUpstreamFailureIsReported(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "downstream", Version: "1"}, nil)
 	bridge, err := ConnectAndRegister(context.Background(), []config.UpstreamMCPConfig{
 		{Name: "offline", URL: "http://127.0.0.1:1/mcp", Transport: "streamable_http", Mode: "catalog", Required: false},
-	}, server, slog.New(slog.NewTextHandler(io.Discard, nil)), map[string]struct{}{})
+	}, server, slog.New(slog.NewTextHandler(io.Discard, nil)), map[string]struct{}{}, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}

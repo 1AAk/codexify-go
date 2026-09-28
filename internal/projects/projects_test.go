@@ -149,6 +149,135 @@ func TestProjectCatalogFiltersAndSkipsNestedRepositoryContents(t *testing.T) {
 	}
 }
 
+func TestScratchSwitchAndResumeLifecycle(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project-a")
+	initGitRepo(t, project)
+	manager := testManager(t, root, "auto")
+
+	meta := map[string]any{"openai/session": "chat-lifecycle"}
+	selected, err := manager.Select(meta, "project-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err := manager.Switch(meta, selected.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !change.AwaitingSelection || change.PreviousRoot != selected.ProjectRoot {
+		t.Fatalf("unexpected switch: %+v", change)
+	}
+	if _, _, err := manager.Workspace(meta); err == nil {
+		t.Fatal("workspace should be unselected after switch")
+	}
+
+	scratch, err := manager.SelectScratch(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scratch.Mode != "scratch" || scratch.SourceProjectRoot != "" {
+		t.Fatalf("unexpected scratch selection: %+v", scratch)
+	}
+	if _, err := os.Stat(scratch.ProjectRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.Switch(meta, scratch.ProjectRoot); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := manager.Resume(meta, selected.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Mode != "project" || filepath.Clean(resumed.ProjectRoot) != filepath.Clean(selected.ProjectRoot) {
+		t.Fatalf("unexpected resumed selection: %+v", resumed)
+	}
+}
+
+func TestNewConversationCanResumeSavedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project-a")
+	initGitRepo(t, project)
+	manager := testManager(t, root, "never")
+
+	first, err := manager.Select(map[string]any{"openai/session": "chat-one"}, "project-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := manager.Resume(map[string]any{"openai/session": "chat-two"}, first.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(resumed.ProjectRoot) != filepath.Clean(first.ProjectRoot) {
+		t.Fatalf("resume mismatch: %+v", resumed)
+	}
+}
+
+func TestRepositoryReferenceParsing(t *testing.T) {
+	tests := []struct {
+		input    string
+		kind     CheckoutKind
+		checkout string
+		identity string
+	}{
+		{"https://github.com/owner/repo", CheckoutDefault, "", "owner/repo"},
+		{"https://github.com/owner/repo/tree/feature/test", CheckoutBranch, "feature/test", "owner/repo"},
+		{"https://github.com/owner/repo/pull/42", CheckoutPR, "42", "owner/repo"},
+		{"https://github.com/owner/repo/commit/0123456789abcdef0123456789abcdef01234567", CheckoutCommit, "0123456789abcdef0123456789abcdef01234567", "owner/repo"},
+		{"git@github.com:owner/repo.git", CheckoutDefault, "", "owner/repo"},
+		{"https://gitlab.example/group/repo.git", CheckoutDefault, "", "gitlab.example/group/repo"},
+		{"git@gitlab.example:group/repo.git", CheckoutDefault, "", "gitlab.example/group/repo"},
+	}
+	for _, tt := range tests {
+		ref, err := ParseRepositoryReference(tt.input)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tt.input, err)
+		}
+		if ref.CheckoutKind != tt.kind || ref.Checkout != tt.checkout || ref.Identity != tt.identity {
+			t.Fatalf("parse %q = %+v", tt.input, ref)
+		}
+	}
+
+	invalid := []string{
+		"file:///tmp/repo.git",
+		"https://user:secret@github.com/owner/repo.git",
+		"https://gitlab.example/group/repo",
+		"https://github.com/owner/repo/commit/deadbeef",
+		"https://github.com/owner/repo?token=secret",
+	}
+	for _, input := range invalid {
+		if _, err := ParseRepositoryReference(input); err == nil {
+			t.Fatalf("expected %q to be rejected", input)
+		}
+	}
+}
+
+func TestRepositoryURLReusesMatchingCheckout(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "existing")
+	initGitRepo(t, repo)
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/example/reusable.git")
+	manager := testManager(t, root, "never")
+
+	selected, err := manager.Select(
+		map[string]any{"openai/session": "repo-url-reuse"},
+		"https://github.com/example/reusable",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Cloned {
+		t.Fatal("matching local checkout should be reused rather than cloned")
+	}
+	if filepath.Clean(selected.SourceProjectRoot) != filepath.Clean(repo) {
+		t.Fatalf("source = %q want %q", selected.SourceProjectRoot, repo)
+	}
+	if selected.RepositoryURL != "https://github.com/example/reusable" {
+		t.Fatalf("repository URL = %q", selected.RepositoryURL)
+	}
+}
+
 func testManager(t *testing.T, root, mode string) *Manager {
 	t.Helper()
 	manager, err := New(config.MCPConfig{

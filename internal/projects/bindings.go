@@ -10,13 +10,20 @@ import (
 	"time"
 )
 
-const bindingVersion = 1
+const (
+	bindingVersion       = 2
+	legacyBindingVersion = 1
+)
 
 type Binding struct {
 	Version           int    `json:"version"`
 	IdentityHash      string `json:"identityHash"`
+	Mode              string `json:"mode,omitempty"`
 	SourceProjectRoot string `json:"sourceProjectRoot"`
 	ProjectRoot       string `json:"projectRoot"`
+	RepositoryURL     string `json:"repositoryUrl,omitempty"`
+	CheckoutCommit    string `json:"checkoutCommit,omitempty"`
+	Cloned            bool   `json:"cloned,omitempty"`
 	ManagedWorktree   bool   `json:"managedWorktree"`
 	WorktreeGitRoot   string `json:"worktreeGitRoot,omitempty"`
 	WorktreesRoot     string `json:"worktreesRoot,omitempty"`
@@ -35,28 +42,35 @@ func (m *Manager) readBinding(identity *Identity) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	var binding Binding
-	if err := json.Unmarshal(data, &binding); err != nil {
-		return nil, fmt.Errorf("decode project binding: %w", err)
+	binding, err := decodeBinding(data)
+	if err != nil {
+		return nil, err
 	}
-	if binding.Version != bindingVersion || binding.IdentityHash != identity.Key {
+	if binding.IdentityHash != identity.Key {
 		return nil, errors.New("project binding identity/version mismatch")
 	}
 	if _, err := os.Stat(binding.ProjectRoot); err != nil {
 		return nil, fmt.Errorf("bound project is no longer available: %w", err)
 	}
-	return &binding, nil
+	return binding, nil
 }
 
 func (m *Manager) writeBinding(binding Binding) error {
 	if err := os.MkdirAll(m.cfg.BindingsDir, 0o700); err != nil {
 		return err
 	}
+	path := filepath.Join(m.cfg.BindingsDir, binding.IdentityHash+".json")
+	return writeBindingFile(path, binding)
+}
+
+func writeBindingFile(path string, binding Binding) error {
 	data, err := json.MarshalIndent(binding, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(m.cfg.BindingsDir, binding.IdentityHash+".json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	tmp := path + ".tmp-" + fmt.Sprint(time.Now().UnixNano())
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return err
@@ -66,6 +80,23 @@ func (m *Manager) writeBinding(binding Binding) error {
 		return err
 	}
 	return nil
+}
+
+func decodeBinding(data []byte) (*Binding, error) {
+	var binding Binding
+	if err := json.Unmarshal(data, &binding); err != nil {
+		return nil, fmt.Errorf("decode project binding: %w", err)
+	}
+	if binding.Version != bindingVersion && binding.Version != legacyBindingVersion {
+		return nil, fmt.Errorf("unsupported project binding version %d", binding.Version)
+	}
+	if binding.Mode == "" {
+		binding.Mode = "project"
+	}
+	if binding.ProjectRoot == "" {
+		return nil, errors.New("project binding is missing projectRoot")
+	}
+	return &binding, nil
 }
 
 func (m *Manager) bindingPath(identity *Identity) string {
@@ -93,7 +124,7 @@ func (m *Manager) sourceInUse(source string, identity *Identity) bool {
 		if identity != nil && binding.IdentityHash == identity.Key {
 			continue
 		}
-		if cleanComparable(binding.SourceProjectRoot) == source {
+		if binding.Mode != "scratch" && cleanComparable(binding.SourceProjectRoot) == source {
 			if _, err := os.Stat(binding.ProjectRoot); err == nil {
 				return true
 			}

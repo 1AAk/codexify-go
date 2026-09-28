@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,11 +21,20 @@ import (
 )
 
 type Bridge struct {
-	mu       sync.RWMutex
-	sources  map[string]*source
-	sessions []*mcp.ClientSession
-	report   []string
-	log      *slog.Logger
+	mu               sync.RWMutex
+	sources          map[string]*source
+	resources        map[string]resourceRef
+	sessions         []*mcp.ClientSession
+	report           []string
+	log              *slog.Logger
+	maxResourceBytes int64
+}
+
+const resourcePrefix = "codexify-go://upstream-resource/"
+
+type resourceRef struct {
+	source *source
+	uri    string
 }
 
 type source struct {
@@ -82,13 +93,26 @@ type CallToolInput struct {
 	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
-func ConnectAndRegister(ctx context.Context, specs []config.UpstreamMCPConfig, server *mcp.Server, logger *slog.Logger, used map[string]struct{}) (*Bridge, error) {
+func ConnectAndRegister(ctx context.Context, specs []config.UpstreamMCPConfig, server *mcp.Server, logger *slog.Logger, used map[string]struct{}, maxResourceBytes int64) (*Bridge, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	b := &Bridge{
-		sources: make(map[string]*source),
-		log:     logger,
+		sources:          make(map[string]*source),
+		resources:        make(map[string]resourceRef),
+		log:              logger,
+		maxResourceBytes: maxResourceBytes,
+	}
+	if b.maxResourceBytes <= 0 {
+		b.maxResourceBytes = 100 * 1024 * 1024
+	}
+	if len(specs) > 0 {
+		server.AddResourceTemplate(&mcp.ResourceTemplate{
+			URITemplate: resourcePrefix + "{token}",
+			Name:        "codexify-go-upstream-resource",
+			Title:       "Bridged upstream MCP resource",
+			Description: "Opaque capability URI for resources returned by an upstream MCP tool.",
+		}, b.readResource)
 	}
 	for _, spec := range specs {
 		src, err := connectSource(ctx, spec, logger)
@@ -106,7 +130,7 @@ func ConnectAndRegister(ctx context.Context, specs []config.UpstreamMCPConfig, s
 		b.sessions = append(b.sessions, src.session)
 		b.report = append(b.report, fmt.Sprintf("%s -> %s (%d tool(s))", src.name, src.mode, len(src.tools)))
 		if src.mode == "direct" {
-			registerDirect(server, src, used)
+			b.registerDirect(server, src, used)
 		}
 	}
 
@@ -144,7 +168,7 @@ func connectSource(ctx context.Context, spec config.UpstreamMCPConfig, logger *s
 	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "codexify-go-bridge", Version: "0.4.0-dev"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "codexify-go-bridge", Version: "0.5.0-dev"}, nil)
 	var transport mcp.Transport
 	switch transportKind {
 	case "stdio":
@@ -230,7 +254,7 @@ func listAllTools(ctx context.Context, session *mcp.ClientSession) ([]*mcp.Tool,
 	}
 }
 
-func registerDirect(server *mcp.Server, src *source, used map[string]struct{}) {
+func (b *Bridge) registerDirect(server *mcp.Server, src *source, used map[string]struct{}) {
 	names := make([]string, 0, len(src.tools))
 	for name := range src.tools {
 		names = append(names, name)
@@ -254,10 +278,14 @@ func registerDirect(server *mcp.Server, src *source, used map[string]struct{}) {
 					return nil, fmt.Errorf("decode bridged arguments: %w", err)
 				}
 			}
-			return src.session.CallTool(callCtx, &mcp.CallToolParams{
+			result, err := src.session.CallTool(callCtx, &mcp.CallToolParams{
 				Name:      original,
 				Arguments: args,
 			})
+			if err != nil {
+				return nil, err
+			}
+			return b.rewriteResourceLinks(src, result)
 		})
 	}
 }
@@ -386,7 +414,92 @@ func (b *Bridge) callTool(ctx context.Context, sourceName, toolName string, args
 	}
 	callCtx, cancel := context.WithTimeout(ctx, src.timeout)
 	defer cancel()
-	return src.session.CallTool(callCtx, &mcp.CallToolParams{Name: toolName, Arguments: args})
+	result, err := src.session.CallTool(callCtx, &mcp.CallToolParams{Name: toolName, Arguments: args})
+	if err != nil {
+		return nil, err
+	}
+	return b.rewriteResourceLinks(src, result)
+}
+
+func (b *Bridge) rewriteResourceLinks(src *source, result *mcp.CallToolResult) (*mcp.CallToolResult, error) {
+	if result == nil || len(result.Content) == 0 {
+		return result, nil
+	}
+	copyResult := *result
+	copyResult.Content = append([]mcp.Content(nil), result.Content...)
+	for i, content := range copyResult.Content {
+		link, ok := content.(*mcp.ResourceLink)
+		if !ok || link == nil || strings.TrimSpace(link.URI) == "" {
+			continue
+		}
+		if link.Size != nil && *link.Size > b.maxResourceBytes {
+			return nil, fmt.Errorf("upstream MCP resource %q exceeds artifactEgress.maxFileBytes", link.URI)
+		}
+		token, err := randomCapabilityToken()
+		if err != nil {
+			continue
+		}
+		b.mu.Lock()
+		if len(b.resources) >= 512 {
+			for key := range b.resources {
+				delete(b.resources, key)
+				break
+			}
+		}
+		b.resources[token] = resourceRef{source: src, uri: link.URI}
+		b.mu.Unlock()
+		copyLink := *link
+		copyLink.URI = resourcePrefix + token
+		copyResult.Content[i] = &copyLink
+	}
+	return &copyResult, nil
+}
+
+func (b *Bridge) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	if req == nil || req.Params == nil {
+		return nil, mcp.ResourceNotFoundError("")
+	}
+	uri := req.Params.URI
+	token := strings.TrimPrefix(uri, resourcePrefix)
+	if token == uri || token == "" || strings.Contains(token, "/") {
+		return nil, mcp.ResourceNotFoundError(uri)
+	}
+	b.mu.RLock()
+	ref, ok := b.resources[token]
+	b.mu.RUnlock()
+	if !ok || ref.source == nil {
+		return nil, mcp.ResourceNotFoundError(uri)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, ref.source.timeout)
+	defer cancel()
+	result, err := ref.source.session.ReadResource(readCtx, &mcp.ReadResourceParams{URI: ref.uri})
+	if err != nil {
+		return nil, err
+	}
+	copyResult := *result
+	copyResult.Contents = make([]*mcp.ResourceContents, 0, len(result.Contents))
+	var total int64
+	for _, item := range result.Contents {
+		if item == nil {
+			continue
+		}
+		copyItem := *item
+		total += int64(len(copyItem.Text)) + int64(len(copyItem.Blob))
+		if total > b.maxResourceBytes {
+			return nil, errors.New("upstream MCP resource exceeds artifactEgress.maxFileBytes")
+		}
+		copyItem.URI = uri
+		copyResult.Contents = append(copyResult.Contents, &copyItem)
+	}
+	return &copyResult, nil
+}
+
+func randomCapabilityToken() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
 }
 
 func (b *Bridge) hasCatalogSources() bool {

@@ -31,12 +31,15 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Version    int              `json:"version"`
-	Log        LogConfig        `json:"log"`
-	Service    ServiceConfig    `json:"service"`
-	MCP        MCPConfig        `json:"mcp"`
-	Tunnel     TunnelConfig     `json:"tunnel"`
-	Supervisor SupervisorConfig `json:"supervisor"`
+	Version        int                  `json:"version"`
+	Log            LogConfig            `json:"log"`
+	Service        ServiceConfig        `json:"service"`
+	MCP            MCPConfig            `json:"mcp"`
+	Memory         MemoryConfig         `json:"memory"`
+	Skills         SkillsConfig         `json:"skills"`
+	ArtifactEgress ArtifactEgressConfig `json:"artifactEgress"`
+	Tunnel         TunnelConfig         `json:"tunnel"`
+	Supervisor     SupervisorConfig     `json:"supervisor"`
 }
 
 type LogConfig struct {
@@ -56,6 +59,8 @@ type MCPConfig struct {
 	MaxRequestBodyBytes int64               `json:"maxRequestBodyBytes"`
 	MultiProject        bool                `json:"multiProject"`
 	BindingsDir         string              `json:"bindingsDir,omitempty"`
+	CloneDir            string              `json:"cloneDir,omitempty"`
+	ScratchDir          string              `json:"scratchDir,omitempty"`
 	ProjectScanDepth    int                 `json:"projectScanDepth,omitempty"`
 	Worktrees           WorktreeConfig      `json:"worktrees"`
 	Projects            []ProjectSpec       `json:"projects,omitempty"`
@@ -85,6 +90,29 @@ type UpstreamMCPConfig struct {
 	Headers   map[string]string `json:"headers,omitempty"`
 	Required  bool              `json:"required,omitempty"`
 	Timeout   Duration          `json:"timeout,omitempty"`
+}
+
+type MemoryConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Dir      string `json:"dir,omitempty"`
+	MaxBytes int    `json:"maxBytes,omitempty"`
+}
+
+type SkillsConfig struct {
+	Enabled     bool     `json:"enabled"`
+	IncludeUser bool     `json:"includeUser"`
+	Dirs        []string `json:"dirs,omitempty"`
+}
+
+type ArtifactEgressConfig struct {
+	Enabled              bool     `json:"enabled"`
+	Dir                  string   `json:"dir,omitempty"`
+	MaxFileBytes         int64    `json:"maxFileBytes,omitempty"`
+	SnapshotMaxFileBytes int64    `json:"snapshotMaxFileBytes,omitempty"`
+	MaxSnapshotBytes     int64    `json:"maxSnapshotBytes,omitempty"`
+	FallbackToSource     bool     `json:"fallbackToSource"`
+	MaxReferences        int      `json:"maxReferences,omitempty"`
+	ReferenceTTL         Duration `json:"referenceTtl,omitempty"`
 }
 
 type TunnelConfig struct {
@@ -129,6 +157,23 @@ func Default() Config {
 			Worktrees: WorktreeConfig{
 				Mode: "auto",
 			},
+		},
+		Memory: MemoryConfig{
+			Enabled:  true,
+			MaxBytes: 16 * 1024,
+		},
+		Skills: SkillsConfig{
+			Enabled:     true,
+			IncludeUser: true,
+		},
+		ArtifactEgress: ArtifactEgressConfig{
+			Enabled:              true,
+			MaxFileBytes:         100 * 1024 * 1024,
+			SnapshotMaxFileBytes: 100 * 1024 * 1024,
+			MaxSnapshotBytes:     5 * 1024 * 1024 * 1024,
+			FallbackToSource:     true,
+			MaxReferences:        64,
+			ReferenceTTL:         Duration(5 * time.Minute),
 		},
 		Tunnel: TunnelConfig{
 			StartupWaitTimeout: Duration(15 * time.Second),
@@ -176,11 +221,30 @@ func (c *Config) expand(base string) {
 		return filepath.Clean(filepath.Join(base, v))
 	}
 	c.Log.File = expand(c.Log.File)
+	if c.Memory.Dir != "" {
+		c.Memory.Dir = expand(c.Memory.Dir)
+	}
+	if c.ArtifactEgress.Dir != "" {
+		c.ArtifactEgress.Dir = expand(c.ArtifactEgress.Dir)
+	}
+	for i, dir := range c.Skills.Dirs {
+		c.Skills.Dirs[i] = expand(dir)
+	}
 	c.MCP.WorkspaceRoot = expand(c.MCP.WorkspaceRoot)
 	if c.MCP.BindingsDir == "" {
 		c.MCP.BindingsDir = filepath.Join(c.MCP.WorkspaceRoot, ".codexify-go", "bindings")
 	} else {
 		c.MCP.BindingsDir = expand(c.MCP.BindingsDir)
+	}
+	if c.MCP.CloneDir == "" {
+		c.MCP.CloneDir = filepath.Join(c.MCP.WorkspaceRoot, ".codexify-go", "clones")
+	} else {
+		c.MCP.CloneDir = expand(c.MCP.CloneDir)
+	}
+	if c.MCP.ScratchDir == "" {
+		c.MCP.ScratchDir = filepath.Join(c.MCP.WorkspaceRoot, ".codexify-go", "scratch")
+	} else {
+		c.MCP.ScratchDir = expand(c.MCP.ScratchDir)
 	}
 	if c.MCP.Worktrees.Root == "" {
 		c.MCP.Worktrees.Root = filepath.Join(c.MCP.WorkspaceRoot, ".codexify-go", "worktrees")
@@ -245,6 +309,24 @@ func (c Config) Validate() error {
 	}
 	if c.MCP.MaxRequestBodyBytes <= 0 {
 		errs = append(errs, errors.New("mcp.maxRequestBodyBytes must be > 0"))
+	}
+	if c.Memory.MaxBytes <= 0 {
+		errs = append(errs, errors.New("memory.maxBytes must be > 0"))
+	}
+	if c.ArtifactEgress.MaxFileBytes <= 0 {
+		errs = append(errs, errors.New("artifactEgress.maxFileBytes must be > 0"))
+	}
+	if c.ArtifactEgress.SnapshotMaxFileBytes < 0 {
+		errs = append(errs, errors.New("artifactEgress.snapshotMaxFileBytes must be >= 0"))
+	}
+	if c.ArtifactEgress.MaxSnapshotBytes < 0 {
+		errs = append(errs, errors.New("artifactEgress.maxSnapshotBytes must be >= 0"))
+	}
+	if c.ArtifactEgress.MaxReferences < 1 || c.ArtifactEgress.MaxReferences > 1024 {
+		errs = append(errs, errors.New("artifactEgress.maxReferences must be between 1 and 1024"))
+	}
+	if c.ArtifactEgress.ReferenceTTL.Duration() <= 0 {
+		errs = append(errs, errors.New("artifactEgress.referenceTtl must be > 0"))
 	}
 	if c.MCP.ProjectScanDepth < 0 || c.MCP.ProjectScanDepth > 8 {
 		errs = append(errs, errors.New("mcp.projectScanDepth must be between 0 and 8"))

@@ -18,9 +18,13 @@ import (
 	"time"
 
 	"github.com/benice2me11/codexify-go/internal/agenttools"
+	"github.com/benice2me11/codexify-go/internal/artifacts"
 	"github.com/benice2me11/codexify-go/internal/config"
 	"github.com/benice2me11/codexify-go/internal/execsession"
+	"github.com/benice2me11/codexify-go/internal/memory"
 	"github.com/benice2me11/codexify-go/internal/projects"
+	"github.com/benice2me11/codexify-go/internal/skills"
+	"github.com/benice2me11/codexify-go/internal/ui"
 	"github.com/benice2me11/codexify-go/internal/upstream"
 	"github.com/benice2me11/codexify-go/internal/workspace"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -29,16 +33,19 @@ import (
 const InternalAuthEnv = "CODEXIFY_GO_INTERNAL_MCP_AUTHORIZATION"
 
 type Runtime struct {
-	cfg      config.Config
-	root     *workspace.Root
-	projects *projects.Manager
-	bridge   *upstream.Bridge
-	exec     *execsession.Manager
-	server   *mcp.Server
-	http     *http.Server
-	listener net.Listener
-	token    string
-	log      *slog.Logger
+	cfg       config.Config
+	root      *workspace.Root
+	projects  *projects.Manager
+	bridge    *upstream.Bridge
+	memory    *memory.Store
+	skills    *skills.Reader
+	artifacts *artifacts.Store
+	exec      *execsession.Manager
+	server    *mcp.Server
+	http      *http.Server
+	listener  net.Listener
+	token     string
+	log       *slog.Logger
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*Runtime, error) {
@@ -73,21 +80,43 @@ func NewWithToken(cfg config.Config, logger *slog.Logger, token string) (*Runtim
 		}
 	}
 
+	artifactStore, err := artifacts.New(cfg.ArtifactEgress)
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("initialize artifact store: %w", err)
+	}
 	r := &Runtime{
-		cfg:      cfg,
-		root:     root,
-		projects: projectManager,
-		exec:     execsession.NewManager(),
-		listener: ln,
-		token:    token,
-		log:      logger,
+		cfg:       cfg,
+		root:      root,
+		projects:  projectManager,
+		memory:    memory.New(cfg.Memory, cfg.MCP.MultiProject),
+		skills:    skills.New(cfg.Skills),
+		artifacts: artifactStore,
+		exec:      execsession.NewManager(),
+		listener:  ln,
+		token:     token,
+		log:       logger,
 	}
 	r.server = mcp.NewServer(&mcp.Implementation{
 		Name:    "codexify-go",
-		Version: "0.4.0-dev",
+		Version: "0.5.0-dev",
 	}, &mcp.ServerOptions{Logger: logger})
+	r.registerUIResources()
 	r.registerTools()
-	bridge, err := upstream.ConnectAndRegister(context.Background(), cfg.MCP.Upstreams, r.server, logger, builtInToolNames())
+	if r.artifacts.Enabled() {
+		r.server.AddResourceTemplate(&mcp.ResourceTemplate{
+			URITemplate: artifacts.Prefix + "{token}",
+			Name:        "codexify-go-exported-file",
+			Title:       "Exported workspace file",
+			Description: "Opaque downloadable snapshot exported from the active workspace.",
+		}, func(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			if req == nil || req.Params == nil {
+				return nil, mcp.ResourceNotFoundError("")
+			}
+			return r.artifacts.Read(req.Params.URI)
+		})
+	}
+	bridge, err := upstream.ConnectAndRegister(context.Background(), cfg.MCP.Upstreams, r.server, logger, builtInToolNames(), cfg.ArtifactEgress.MaxFileBytes)
 	if err != nil {
 		ln.Close()
 		r.exec.Close()
@@ -161,6 +190,7 @@ func (r *Runtime) Handler() http.Handler {
 
 func (r *Runtime) registerTools() {
 	mcp.AddTool(r.server, &mcp.Tool{
+		Meta:        ui.SetupToolMeta(),
 		Name:        "list_projects",
 		Description: "List selectable projects below the configured access root before binding this ChatGPT conversation.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in ListProjectsInput) (*mcp.CallToolResult, projects.ListOutput, error) {
@@ -169,11 +199,64 @@ func (r *Runtime) registerTools() {
 	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
+		Meta:        ui.SetupToolMeta(),
 		Name:        "set_project_root",
-		Description: "Bind this ChatGPT conversation to one existing project below the access root. Repeating the same selection is idempotent; switching to another project is rejected.",
+		Description: "Bind this ChatGPT conversation to a local project selector or supported HTTPS/SSH Git repository URL, explicitly choose scratch with withoutProject=true, or resume a previously saved exact workspace with resumePath. Switching an existing binding requires setup_ui_switch_project first.",
 	}, func(_ context.Context, req *mcp.CallToolRequest, in SetProjectRootInput) (*mcp.CallToolResult, projects.WorkspaceInfo, error) {
-		out, err := r.projects.Select(requestMeta(req), in.Path, in.CreateWorktree)
+		meta := requestMeta(req)
+		var (
+			out projects.WorkspaceInfo
+			err error
+		)
+		switch {
+		case strings.TrimSpace(in.ResumePath) != "":
+			if strings.TrimSpace(in.Path) != "" || in.WithoutProject || in.CreateWorktree != nil {
+				return nil, out, errors.New("resumePath cannot be combined with path, withoutProject, or createWorktree")
+			}
+			out, err = r.projects.Resume(meta, in.ResumePath)
+		case strings.TrimSpace(in.Path) != "":
+			if in.WithoutProject {
+				return nil, out, errors.New("provide either path or withoutProject=true, not both")
+			}
+			out, err = r.projects.Select(meta, in.Path, in.CreateWorktree)
+		case in.WithoutProject:
+			if in.CreateWorktree != nil {
+				return nil, out, errors.New("createWorktree only applies to a project path")
+			}
+			out, err = r.projects.SelectScratch(meta)
+		default:
+			return nil, out, errors.New("provide path, withoutProject=true, or resumePath")
+		}
 		return nil, out, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Meta:        ui.AppOnlyToolMeta(),
+		Name:        "setup_ui_switch_project",
+		Description: "Explicitly reopen workspace selection for the current ChatGPT conversation. Archives the active binding and preserves all files/worktrees; call set_project_root afterward.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in SwitchProjectInput) (*mcp.CallToolResult, projects.WorkspaceChange, error) {
+		out, err := r.projects.Switch(requestMeta(req), in.ExpectedPath)
+		return nil, out, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Meta:        ui.AppOnlyToolMeta(),
+		Name:        "setup_status",
+		Description: "Read current workspace-selection status for the setup app without modifying project state.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, SetupStatusOutput, error) {
+		status, err := r.projects.Status(requestMeta(req))
+		if err != nil {
+			return nil, SetupStatusOutput{}, err
+		}
+		return nil, SetupStatusOutput{
+			Version:           "0.5.0-dev",
+			MultiProject:      status.MultiProject,
+			AccessRoot:        status.AccessRoot,
+			WorktreeMode:      status.WorktreeMode,
+			Selected:          status.Selected,
+			AwaitingSelection: status.AwaitingSelection,
+			Workspace:         status.Workspace,
+		}, nil
 	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
@@ -209,6 +292,93 @@ func (r *Runtime) registerTools() {
 			DefaultShell:    shell,
 			Username:        username,
 		}, nil
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "recall",
+		Description: "Return durable memory notes saved for the active project/workspace by earlier turns or conversations.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, TextOutput, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, TextOutput{}, err
+		}
+		content, err := r.memory.Recall(root.Path())
+		return nil, TextOutput{Content: content}, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "remember",
+		Description: "Create one durable note for the active project/workspace under a new short key; refuses to overwrite an existing key.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in MemoryNoteInput) (*mcp.CallToolResult, TextOutput, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, TextOutput{}, err
+		}
+		content, err := r.memory.Create(root.Path(), in.Key, in.Value)
+		return nil, TextOutput{Content: content}, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "update_memory_note",
+		Description: "Replace one existing durable project-memory note without creating a missing key.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in MemoryNoteInput) (*mcp.CallToolResult, TextOutput, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, TextOutput{}, err
+		}
+		content, err := r.memory.Update(root.Path(), in.Key, in.Value)
+		return nil, TextOutput{Content: content}, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "forget_memory_note",
+		Description: "Delete one existing durable project-memory note by key.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in ForgetMemoryInput) (*mcp.CallToolResult, TextOutput, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, TextOutput{}, err
+		}
+		content, err := r.memory.Delete(root.Path(), in.Key)
+		return nil, TextOutput{Content: content}, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "skills_list",
+		Description: "List instruction skills available for the active project/workspace and user skill roots.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, skills.Catalog, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, skills.Catalog{}, err
+		}
+		out, err := r.skills.List(root.Path())
+		return nil, out, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "skills_read",
+		Description: "Read a selected skill's SKILL.md or one package-relative resource with line-window pagination.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in skills.ReadInput) (*mcp.CallToolResult, skills.ReadOutput, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, skills.ReadOutput{}, err
+		}
+		out, err := r.skills.Read(root.Path(), in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(r.server, &mcp.Tool{
+		Name:        "export_host_file",
+		Description: "Export one existing file from the active workspace as an opaque downloadable MCP resource without exposing a local filesystem path.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in ExportHostFileInput) (*mcp.CallToolResult, artifacts.Receipt, error) {
+		root, _, err := r.workspaceFor(req)
+		if err != nil {
+			return nil, artifacts.Receipt{}, err
+		}
+		link, receipt, err := r.artifacts.Export(root, in.Path)
+		if err != nil {
+			return nil, artifacts.Receipt{}, err
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{link}}, receipt, nil
 	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
@@ -282,6 +452,7 @@ func (r *Runtime) registerTools() {
 	})
 
 	mcp.AddTool(r.server, &mcp.Tool{
+		Meta:        ui.DiffToolMeta(),
 		Name:        "git_diff",
 		Description: "Show the workspace Git diff without external diff helpers or color.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in agenttools.GitDiffInput) (*mcp.CallToolResult, agenttools.GitOutput, error) {
@@ -306,6 +477,41 @@ func (r *Runtime) registerTools() {
 	})
 }
 
+func (r *Runtime) registerUIResources() {
+	resources := []struct {
+		uri         string
+		name        string
+		title       string
+		description string
+		html        string
+	}{
+		{ui.SetupURI, "codexify-go-setup", "Codexify Go workspace setup", "Workspace selection and status app.", ui.SetupHTML},
+		{ui.DiffURI, "codexify-go-diff", "Codexify Go diff", "Compact working-tree diff viewer.", ui.DiffHTML},
+	}
+	for _, item := range resources {
+		item := item
+		r.server.AddResource(&mcp.Resource{
+			Meta:        ui.ResourceMeta(),
+			URI:         item.uri,
+			Name:        item.name,
+			Title:       item.title,
+			Description: item.description,
+			MIMEType:    ui.MIMEType,
+			Size:        int64(len(item.html)),
+		}, func(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			if req == nil || req.Params == nil || req.Params.URI != item.uri {
+				return nil, mcp.ResourceNotFoundError(item.uri)
+			}
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+				URI:      item.uri,
+				MIMEType: ui.MIMEType,
+				Text:     item.html,
+				Meta:     ui.ResourceMeta(),
+			}}}, nil
+		})
+	}
+}
+
 type EmptyInput struct{}
 
 type ListProjectsInput struct {
@@ -314,8 +520,14 @@ type ListProjectsInput struct {
 }
 
 type SetProjectRootInput struct {
-	Path           string `json:"path" jsonschema:"project path relative to the configured access root; use a selector returned by list_projects"`
+	Path           string `json:"path,omitempty" jsonschema:"project selector relative to the access root, or a supported HTTPS/SSH Git repository URL; GitHub HTTPS branch, pull-request, and full commit URLs are supported"`
+	WithoutProject bool   `json:"withoutProject,omitempty" jsonschema:"set true only for an explicit scratch/no-project request"`
 	CreateWorktree *bool  `json:"createWorktree,omitempty" jsonschema:"explicitly force or disable managed-worktree creation; omit to follow configured worktree mode"`
+	ResumePath     string `json:"resumePath,omitempty" jsonschema:"absolute active workspace path previously saved by codexify-go; cannot be combined with other selection fields"`
+}
+
+type SwitchProjectInput struct {
+	ExpectedPath string `json:"expectedPath,omitempty" jsonschema:"optional active workspace path from the UI/card; rejects the switch if the workspace changed meanwhile"`
 }
 
 type EnvironmentOutput struct {
@@ -326,6 +538,33 @@ type EnvironmentOutput struct {
 	BindingScope    string `json:"bindingScope"`
 	DefaultShell    string `json:"defaultShell"`
 	Username        string `json:"username"`
+}
+
+type SetupStatusOutput struct {
+	Version           string                  `json:"version"`
+	MultiProject      bool                    `json:"multiProject"`
+	AccessRoot        string                  `json:"accessRoot"`
+	WorktreeMode      string                  `json:"worktreeMode"`
+	Selected          bool                    `json:"selected"`
+	AwaitingSelection bool                    `json:"awaitingSelection"`
+	Workspace         *projects.WorkspaceInfo `json:"workspace,omitempty"`
+}
+
+type TextOutput struct {
+	Content string `json:"content"`
+}
+
+type MemoryNoteInput struct {
+	Key   string `json:"key" jsonschema:"short stable note key"`
+	Value string `json:"value" jsonschema:"note text, normally one or two sentences"`
+}
+
+type ForgetMemoryInput struct {
+	Key string `json:"key" jsonschema:"existing memory note key"`
+}
+
+type ExportHostFileInput struct {
+	Path string `json:"path" jsonschema:"existing file path relative to the active workspace"`
 }
 
 type ExecCommandInput struct {
@@ -423,7 +662,9 @@ func requestMeta(req *mcp.CallToolRequest) map[string]any {
 
 func builtInToolNames() map[string]struct{} {
 	names := []string{
-		"list_projects", "set_project_root", "list_worktrees", "get_environment",
+		"list_projects", "set_project_root", "setup_ui_switch_project", "setup_status", "list_worktrees", "get_environment",
+		"recall", "remember", "update_memory_note", "forget_memory_note", "skills_list", "skills_read",
+		"export_host_file",
 		"read_file", "write_file", "glob", "grep", "exec_command", "write_stdin",
 		"git_status", "git_diff", "git_log",
 	}

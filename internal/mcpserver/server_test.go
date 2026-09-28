@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benice2me11/codexify-go/internal/artifacts"
 	"github.com/benice2me11/codexify-go/internal/config"
+	"github.com/benice2me11/codexify-go/internal/ui"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -249,6 +251,155 @@ func TestMultiProjectConversationBindingOverMCP(t *testing.T) {
 	}
 	if !unbound.IsError {
 		t.Fatalf("unbound conversation unexpectedly inherited binding: %+v", unbound)
+	}
+}
+
+func TestUIResourcesAndToolMetadata(t *testing.T) {
+	r := testRuntime(t, false)
+	httpServer := httptest.NewServer(r.Handler())
+	defer httpServer.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "ui-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL + "/mcp",
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaByName := map[string]mcp.Meta{}
+	for _, tool := range listed.Tools {
+		metaByName[tool.Name] = tool.Meta
+	}
+	if got := metaByName["list_projects"]["ui/resourceUri"]; got != ui.SetupURI {
+		t.Fatalf("list_projects UI resource = %#v", got)
+	}
+	if got := metaByName["git_diff"]["ui/resourceUri"]; got != ui.DiffURI {
+		t.Fatalf("git_diff UI resource = %#v", got)
+	}
+
+	setup, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: ui.SetupURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(setup.Contents) != 1 || setup.Contents[0].MIMEType != ui.MIMEType || !strings.Contains(setup.Contents[0].Text, "setup_status") {
+		t.Fatalf("unexpected setup UI resource: %+v", setup.Contents)
+	}
+	diff, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: ui.DiffURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Contents) != 1 || !strings.Contains(diff.Contents[0].Text, "toolOutput") {
+		t.Fatalf("unexpected diff UI resource: %+v", diff.Contents)
+	}
+}
+
+func TestArtifactMemoryAndSkillsOverMCP(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "report.txt"), []byte("immutable report\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(workspaceRoot, ".agents", "skills", "demo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: demo\ndescription: Use for demo work\n---\n\nDo demo work.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.MCP.WorkspaceRoot = workspaceRoot
+	cfg.MCP.AuthEnabled = false
+	cfg.Tunnel.MCPServerURL = "http://127.0.0.1:0/mcp"
+	cfg.Tunnel.Executable = filepath.Join(t.TempDir(), "unused.exe")
+	cfg.Tunnel.TunnelID = "tunnel_test"
+	cfg.Tunnel.APIKeyRef = "env:TEST"
+	cfg.Memory.Dir = filepath.Join(t.TempDir(), "memory")
+	cfg.Skills.IncludeUser = false
+	cfg.ArtifactEgress.Dir = filepath.Join(t.TempDir(), "artifacts")
+	cfg.ArtifactEgress.MaxFileBytes = 1 << 20
+	cfg.ArtifactEgress.SnapshotMaxFileBytes = 1 << 20
+	cfg.ArtifactEgress.MaxSnapshotBytes = 4 << 20
+	cfg.ArtifactEgress.MaxReferences = 8
+
+	r, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.listener.Close()
+		r.exec.Close()
+		if r.bridge != nil {
+			r.bridge.Close()
+		}
+	})
+	httpServer := httptest.NewServer(r.Handler())
+	defer httpServer.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "feature-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL + "/mcp",
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	remembered, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "remember",
+		Arguments: map[string]any{"key": "approach", "value": "use the SDK"},
+	})
+	if err != nil || remembered.IsError {
+		t.Fatalf("remember failed: err=%v result=%+v", err, remembered)
+	}
+	recalled, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "recall", Arguments: map[string]any{}})
+	if err != nil || recalled.IsError || !strings.Contains(fmt.Sprint(recalled.StructuredContent), "use the SDK") {
+		t.Fatalf("recall failed: err=%v result=%+v", err, recalled)
+	}
+
+	skillsResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "skills_list", Arguments: map[string]any{}})
+	if err != nil || skillsResult.IsError || !strings.Contains(fmt.Sprint(skillsResult.StructuredContent), "demo") {
+		t.Fatalf("skills_list failed: err=%v result=%+v", err, skillsResult)
+	}
+	readSkill, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "skills_read", Arguments: map[string]any{"name": "demo"}})
+	if err != nil || readSkill.IsError || !strings.Contains(fmt.Sprint(readSkill.StructuredContent), "Do demo work") {
+		t.Fatalf("skills_read failed: err=%v result=%+v", err, readSkill)
+	}
+
+	exported, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "export_host_file",
+		Arguments: map[string]any{"path": "report.txt"},
+	})
+	if err != nil || exported.IsError {
+		t.Fatalf("export_host_file failed: err=%v result=%+v", err, exported)
+	}
+	var link *mcp.ResourceLink
+	for _, content := range exported.Content {
+		if candidate, ok := content.(*mcp.ResourceLink); ok {
+			link = candidate
+			break
+		}
+	}
+	if link == nil || !strings.HasPrefix(link.URI, artifacts.Prefix) {
+		t.Fatalf("missing artifact resource link: %+v", exported.Content)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "report.txt"), []byte("changed after export\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resource, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: link.URI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.Contents) != 1 || string(resource.Contents[0].Blob) != "immutable report\n" {
+		t.Fatalf("artifact snapshot changed: %+v", resource.Contents)
 	}
 }
 
