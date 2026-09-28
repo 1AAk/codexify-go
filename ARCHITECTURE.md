@@ -11,7 +11,7 @@ Scheduled Task on Windows. `codexify-go` starts from a different boundary:
 Windows SCM owns the durable supervisor, and child runtimes are explicitly
 monitored.
 
-## Current topology (Phase 1 + Phase 2 + Phase 3)
+## Current topology (Phase 1 through Phase 4)
 
 ```text
 Windows SCM
@@ -32,10 +32,15 @@ codexify-go.exe service run (LocalSystem)
     |     |
     |     +-- Streamable HTTP MCP server
     |     +-- generated internal bearer auth
-    |     +-- workspace confinement
+    |     +-- project catalogue + conversation bindings
+    |     +-- managed Git worktrees
+    |     +-- workspace confinement per active binding
     |     +-- filesystem/search tools
     |     +-- exec session manager
     |     +-- Git tools
+    |     +-- upstream MCP bridge
+    |           +-- stdio / Streamable HTTP
+    |           +-- catalog / direct exposure
     |
     +-- tunnel supervisor
           |
@@ -109,15 +114,78 @@ remaining compatible with older Streamable HTTP clients.
 
 Current tools:
 
+- `list_projects`, `set_project_root`, `list_worktrees`;
 - `get_environment`;
 - `read_file`, `write_file`;
 - `glob`, `grep`;
 - `exec_command`, `write_stdin`;
 - `git_status`, `git_diff`, `git_log`.
 
-All path-taking tools resolve against one configured workspace root. Absolute
-paths and `..` escapes are rejected, and symlink resolution is checked against
-the canonical root before access.
+When at least one upstream is configured in `catalog` mode, the worker also
+registers `mcp_list_sources`, `mcp_search_tools`, `mcp_get_tool`, and
+`mcp_call_tool`. Upstreams configured in `direct` mode are exposed with a
+sanitized `<source>__<tool>` name.
+
+All path-taking tools resolve against the active conversation workspace.
+Absolute paths and `..` escapes are rejected, and symlink resolution is checked
+against the canonical active root before access.
+
+## Multi-project conversation binding
+
+With `mcp.multiProject=false`, the configured `workspaceRoot` remains the active
+workspace exactly as in earlier phases. With `multiProject=true`, it becomes an
+access root containing selectable projects.
+
+The ChatGPT tunnel forwards a stable conversation identifier in MCP request
+metadata under `_meta["openai/session"]`. `codexify-go` hashes the raw value with
+SHA-256 plus a domain separator and persists only that digest. One JSON binding
+file stores the selected source project and active workspace. Re-selecting the
+same project is idempotent; selecting a different project from the same
+conversation is rejected.
+
+Project discovery is bounded by `projectScanDepth`, skips common build/vendor
+directories, detects common project markers, and can be supplemented with
+explicit `mcp.projects` entries. `list_projects` returns relative selectors so
+configuration and persisted metadata do not depend on a developer's literal
+home-directory string.
+
+## Managed worktrees
+
+Worktree placement is controlled by `mcp.worktrees.mode`:
+
+- `never`: use the source checkout;
+- `always`: create a managed worktree for Git-backed selections;
+- `auto`: use the source checkout until another active conversation already
+  references the same source project, then isolate the later conversation.
+
+Managed worktrees use `git worktree add` and a per-conversation branch under a
+private worktree root. The selected project may be a subdirectory of a larger
+Git repository; the same relative subdirectory is selected inside the managed
+worktree. Binding persistence records both the source project and active
+worktree so service/MCP reconnects reuse the same workspace.
+
+## Upstream MCP aggregation
+
+Aggregation runs inside the interactive-user worker. This is important for
+stdio MCP servers that depend on user PATH, Git credentials, SSH agents, or
+other per-user state.
+
+Supported transports:
+
+- stdio via the official Go MCP SDK `CommandTransport`;
+- Streamable HTTP via `StreamableClientTransport`, with optional request
+  headers.
+
+Supported exposure modes:
+
+- `catalog` (default): tools remain private and are discovered/called through
+  four compact catalog tools;
+- `direct`: each upstream tool is proxied into the main MCP catalog using a
+  collision-safe sanitized name.
+
+Optional upstream failures are reported and skipped; `required=true` makes an
+upstream connection failure fail worker startup. Tool calls have a configured
+timeout and bridge sessions are closed during worker shutdown.
 
 ## Windows process and identity model
 
@@ -158,16 +226,14 @@ account name or profile path.
 
 ## Roadmap
 
-### Phase 3: workspace compatibility (remaining)
+### Phase 5: higher-level Codexify compatibility
 
-- multi-project catalogue;
-- conversation binding;
-- safe project selection;
-- worktree lifecycle;
-- connector/MCP aggregation;
-- skills and persistent memory.
+- repository URL cloning and exact GitHub branch/PR/commit targets;
+- explicit switch/scratch/resume flows;
+- skills and persistent memory;
+- upstream resource/artifact bridging.
 
-### Phase 4: ChatGPT integration
+### Phase 6: ChatGPT integration/UI parity
 
 - connector schema parity;
 - artifact ingress/egress;

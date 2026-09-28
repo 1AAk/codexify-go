@@ -47,20 +47,35 @@ Implemented:
   survive service shutdown;
 - independent worker and tunnel supervision/restart loops;
 - MCP tools and shell commands execute as the logged-in user rather than
-  `LocalSystem`.
+  `LocalSystem`;
+- multi-project catalogue below one configured access root, including explicit
+  project metadata and bounded filesystem discovery;
+- durable ChatGPT conversation binding keyed by a SHA-256 digest of
+  `_meta["openai/session"]`; the raw conversation id is never persisted;
+- `list_projects`, `set_project_root`, and `list_worktrees`;
+- immutable per-conversation project selection with idempotent repeated
+  selection;
+- managed Git worktrees with `auto`, `always`, and `never` policies; `auto`
+  isolates the second active conversation that selects the same source project;
+- upstream MCP aggregation for stdio and Streamable HTTP servers;
+- upstream `catalog` mode through `mcp_list_sources`, `mcp_search_tools`,
+  `mcp_get_tool`, and `mcp_call_tool`, plus `direct` mode using
+  `<source>__<tool>` names;
+- optional/required upstreams, environment/header injection, and bounded
+  upstream call timeouts.
 
 Not implemented yet:
 
-- MCP server aggregation;
-- conversation-to-workspace binding;
-- managed Git worktrees;
 - skills/memory/artifact transport;
 - ChatGPT setup widgets and diff UI;
+- repository URL cloning and GitHub branch/PR/commit target selection;
+- explicit project-switch/scratch/resume UX compatible with upstream Codexify;
 - automatic download/update of `tunnel-client-runtime`;
 - self-update.
 
 The MCP core has been exercised with both raw MCP requests and the official Go
-MCP client. The Phase 3 end-to-end Windows SCM smoke test verifies:
+MCP client. End-to-end Windows SCM smoke tests verify the user-context lifecycle
+and the multi-project/aggregation path:
 
 ```text
 Windows SCM
@@ -74,6 +89,10 @@ Windows SCM
 worker kill  -> worker restarts as the same interactive user
 tunnel kill  -> tunnel restarts and re-authenticates to MCP
 service stop -> worker + tunnel + long-running shell child are all gone
+
+conversation A -> source checkout
+conversation B -> same project -> managed worktree (auto mode)
+catalog upstream -> search echo tool -> call echo tool -> bridged result
 ```
 
 ## Build
@@ -95,7 +114,8 @@ Copy-Item config.example.json config.local.json
 
 Set:
 
-- `mcp.workspaceRoot` to the directory this instance is allowed to access;
+- `mcp.workspaceRoot` to the directory this instance is allowed to access. In
+  multi-project mode this is the **access root**, not an individual project;
 - `tunnel.executable` to OpenAI's official `tunnel-client-runtime.exe`;
 - `tunnel.tunnelId`;
 - `tunnel.apiKeyRef` to an `env:NAME` or `file:C:\...` reference;
@@ -108,6 +128,53 @@ passes it to the tunnel child through an environment reference. It is never
 written to `config.local.json`.
 
 Do not put the OpenAI tunnel API key itself in Git.
+
+### Multi-project mode
+
+Enable durable conversation-scoped project selection with:
+
+```json
+{
+  "mcp": {
+    "workspaceRoot": "<absolute-or-env-expanded-access-root>",
+    "multiProject": true,
+    "projectScanDepth": 2,
+    "worktrees": { "mode": "auto" }
+  }
+}
+```
+
+`list_projects` returns relative selectors beneath the access root.
+`set_project_root` accepts one of those selectors. Bindings survive MCP/service
+restarts and are immutable for that ChatGPT conversation. The raw
+`openai/session` value is hashed before it is used as a binding key or filename.
+
+When `worktrees.mode` is `auto`, the first conversation uses the source checkout
+and a later conversation selecting the same Git project gets an isolated managed
+worktree. `always` always isolates Git projects; `never` always uses the source
+checkout unless an explicit worktree request is made, in which case selection
+fails rather than silently ignoring the request.
+
+### Upstream MCP aggregation
+
+Upstreams are configured under `mcp.upstreams`. Example:
+
+```json
+{
+  "name": "source-name",
+  "transport": "stdio",
+  "mode": "catalog",
+  "command": "example-mcp-server",
+  "args": [],
+  "required": false,
+  "timeout": "15s"
+}
+```
+
+For Streamable HTTP use `"transport": "streamable_http"`, `"url": "..."`,
+and optional `headers`. `catalog` keeps the upstream tool set private behind the
+four `mcp_*` discovery/call tools; `direct` exposes tools as
+`<source>__<original-tool-name>`.
 
 Validate configuration without starting the tunnel:
 
@@ -154,9 +221,11 @@ sessions.
 If no interactive user is logged in, the Windows service remains alive and the
 worker supervisor retries with bounded backoff until an active session appears.
 
-This removes the main LocalSystem limitation from Phase 2. Remaining gaps versus
-the Rust Codexify implementation are primarily product/workspace features such
-as multi-project conversation binding, worktrees, upstream MCP aggregation,
-skills/memory and artifact/UI support.
+This removes the main LocalSystem limitation from Phase 2. Multi-project
+bindings, managed worktrees, and upstream MCP aggregation also run inside this
+user context, so Git credentials and user-scoped MCP commands retain the
+interactive user's environment. Remaining gaps are primarily higher-level
+Codexify product features: cloning/target selection, skills/memory,
+artifact transport, and ChatGPT-specific setup/diff UI.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).
