@@ -11,7 +11,7 @@ Scheduled Task on Windows. `codexify-go` starts from a different boundary:
 Windows SCM owns the durable supervisor, and child runtimes are explicitly
 monitored.
 
-## Current topology (Phase 1 through Phase 4)
+## Current topology (Phase 1 through Phase 5)
 
 ```text
 Windows SCM
@@ -33,14 +33,20 @@ codexify-go.exe service run (LocalSystem)
     |     +-- Streamable HTTP MCP server
     |     +-- generated internal bearer auth
     |     +-- project catalogue + conversation bindings
+    |     +-- repository clone/target materialization
     |     +-- managed Git worktrees
+    |     +-- switch / scratch / resume lifecycle
     |     +-- workspace confinement per active binding
     |     +-- filesystem/search tools
     |     +-- exec session manager
     |     +-- Git tools
+    |     +-- memory + skills
+    |     +-- artifact egress store
+    |     +-- setup + diff MCP App resources
     |     +-- upstream MCP bridge
     |           +-- stdio / Streamable HTTP
     |           +-- catalog / direct exposure
+    |           +-- opaque ResourceLink capabilities
     |
     +-- tunnel supervisor
           |
@@ -114,12 +120,16 @@ remaining compatible with older Streamable HTTP clients.
 
 Current tools:
 
-- `list_projects`, `set_project_root`, `list_worktrees`;
+- `list_projects`, `set_project_root`, `setup_ui_switch_project`,
+  `setup_status`, `list_worktrees`;
 - `get_environment`;
 - `read_file`, `write_file`;
 - `glob`, `grep`;
 - `exec_command`, `write_stdin`;
-- `git_status`, `git_diff`, `git_log`.
+- `git_status`, `git_diff`, `git_log`;
+- `remember`, `recall`, `update_memory_note`, `forget_memory_note`;
+- `skills_list`, `skills_read`;
+- `export_host_file`.
 
 When at least one upstream is configured in `catalog` mode, the worker also
 registers `mcp_list_sources`, `mcp_search_tools`, `mcp_get_tool`, and
@@ -148,6 +158,20 @@ directories, detects common project markers, and can be supplemented with
 explicit `mcp.projects` entries. `list_projects` returns relative selectors so
 configuration and persisted metadata do not depend on a developer's literal
 home-directory string.
+
+Repository references add a second selection route. HTTPS/SSH references are
+parsed into a normalized repository identity; credential-bearing URLs and local
+filesystem transports are rejected. The resolver reuses a unique matching
+checkout beneath the access root or clones into a private staging directory and
+atomically publishes the checkout. GitHub HTTPS URLs may specify a branch,
+pull-request head, or full commit. The exact target is fetched non-interactively
+and converted into an isolated worktree whenever changing the source checkout
+would otherwise be required.
+
+Workspace switching never mutates a binding in place. The prior binding is
+archived, selection becomes explicitly pending, and the next
+`set_project_root` chooses a new project/scratch workspace. `resumePath` can only
+rebind an exact active workspace already present in durable binding history.
 
 ## Managed worktrees
 
@@ -186,6 +210,40 @@ Supported exposure modes:
 Optional upstream failures are reported and skipped; `required=true` makes an
 upstream connection failure fail worker startup. Tool calls have a configured
 timeout and bridge sessions are closed during worker shutdown.
+
+Resource links returned by bridged tools are converted into opaque downstream
+capabilities. The bridge stores only the upstream source/session and original
+URI in private worker memory. `resources/read` on the opaque URI is forwarded
+back upstream, result URIs are rewritten to the capability URI, and total
+payload size is bounded by `artifactEgress.maxFileBytes`.
+
+## Memory and skills
+
+Project memory lives outside the repository in private user state. Its identity
+is derived from the canonical active workspace path and the note set has a
+bounded aggregate size. Create/update/delete semantics are deliberately strict
+so an agent cannot silently overwrite a decision under an existing key.
+
+Skill discovery searches the active repository/workspace and configured user
+roots for `SKILL.md`. YAML frontmatter provides the small list-time catalogue;
+the body and package resources are read only after a skill is chosen. Resource
+resolution is package-confined and rejects absolute paths, `..`, and symlink
+escapes. Client-visible skill paths are scope-relative instead of host-absolute.
+
+## Artifact egress and MCP Apps
+
+`export_host_file` resolves a workspace-relative regular file through the same
+canonical path guard used by file tools. An opaque capability URI references
+either an immutable private snapshot or, when configured, a bounded-TTL safe
+source fallback. Snapshot count/total bytes and individual file size are
+bounded, and no local filesystem path is embedded in the public capability.
+
+Setup and diff surfaces are independent MCP App resources. Tool metadata points
+to self-contained `text/html;profile=mcp-app` documents with no external CSP
+dependencies. The setup app invokes server tools (`setup_status`, selection,
+switch, scratch) and therefore does not duplicate authoritative workspace
+state. The diff app currently renders `git_diff`; upstream Codexify's richer
+incremental `show_diff` checkpoint/review model remains a separate future layer.
 
 ## Windows process and identity model
 
@@ -226,20 +284,16 @@ account name or profile path.
 
 ## Roadmap
 
-### Phase 5: higher-level Codexify compatibility
+### Phase 6: remaining Codexify compatibility
 
-- repository URL cloning and exact GitHub branch/PR/commit targets;
-- explicit switch/scratch/resume flows;
-- skills and persistent memory;
-- upstream resource/artifact bridging.
-
-### Phase 6: ChatGPT integration/UI parity
-
-- connector schema parity;
-- artifact ingress/egress;
-- setup/status UI;
-- diff widget metadata;
-- update/install UX.
+- ChatGPT artifact ingress / attachment materialization;
+- full `show_diff` immutable project-open + incremental checkpoint engine,
+  binary/untracked metadata, and review cursor behavior;
+- transport-session workspace fallback for clients without `openai/session`;
+- plugin-contributed skills / optional Claude skill roots;
+- MCP gateway mode and generated gateway skills;
+- connector-schema migration/version status parity;
+- automatic tunnel-client acquisition/update and self-update UX.
 
 ## Upstream reference
 
