@@ -77,19 +77,32 @@ Implemented:
 - opaque proxy resources for `ResourceLink` values returned by upstream MCP
   tools, with downstream `resources/read` forwarding and size limits;
 - compact MCP App resources for workspace setup/status and `git_diff`, using
-  standard `ui/resourceUri` and OpenAI output-template metadata.
+  standard `ui/resourceUri` and OpenAI output-template metadata;
+- `get_agent_brief` / `get_project_doc` with environment, saved memory, skill
+  catalogue, and `AGENTS.override.md` / `AGENTS.md` discovery from repository
+  root to the active workspace; project instructions are rendered last;
+- workspace-confined `apply_patch` using Codex patch grammar with full
+  preflight/context validation before the first write;
+- checkpointed `show_diff` with immutable `project_open` and incremental
+  `last_diff` baselines, tracked/untracked/deleted state, bounded patch metadata,
+  and a private diff cursor that does not modify the user's Git index;
+- secure `import_host_file` for host-authorized ChatGPT/native file references:
+  HTTPS-only downloads, host allowlist, redirect/DNS/private-IP checks, byte and
+  timeout bounds, and no overwrite of existing workspace files;
+- hybrid MCP transport: current `2026-07-28` clients use stateless requests,
+  while legacy/stateful clients without `openai/session` receive an isolated
+  transport-session workspace binding that is forgotten on disconnect;
+- upstream MCP `gateway` mode: one compact gateway tool plus a generated
+  `SKILL.md` containing the upstream function list and exact input schemas;
+- tunnel-scoped connector schema markers surfaced by `setup_status`, including
+  per-conversation stale-version detection for setup/reload UX.
 
 Not implemented yet:
 
-- artifact ingress from ChatGPT/user attachments into the active workspace;
-- upstream Codexify's full `show_diff` project-open/last-diff checkpoint engine,
-  binary/untracked diff metadata, and review cursor semantics (`git_diff` has a
-  compact MCP App viewer but is still the simpler working-tree diff tool);
-- connector-schema/version migration and setup update-status parity;
-- transport-session workspace fallback for non-ChatGPT MCP clients that do not
-  provide `_meta["openai/session"]`;
 - plugin-contributed skills and optional Claude skill discovery;
-- upstream MCP gateway-mode generated skills (catalog/direct are implemented);
+- full upstream connector-schema discovery/reload migration history and bounded
+  public release/update checks (the local schema marker/stale status is present);
+- upstream Markdown-chat / agent-ticket product surfaces;
 - automatic download/update of `tunnel-client-runtime`;
 - self-update.
 
@@ -117,6 +130,11 @@ catalog upstream -> search echo tool -> call echo tool -> bridged result
 GitHub commit URL -> private clone -> fetched exact commit -> managed worktree
 project -> remember/export -> switch -> scratch -> skill read -> resume project
 setup MCP App resource -> readable with text/html;profile=mcp-app
+
+get_agent_brief -> gateway skill + AGENTS.md at highest project priority
+apply_patch -> show_diff(project_open) -> apply_patch -> show_diff(last_diff)
+host file reference -> HTTPS ingress -> new workspace file
+legacy stateful MCP session -> transient project binding -> disconnect -> forgotten
 ```
 
 ## Build
@@ -236,13 +254,55 @@ exported, snapshots use a bounded durable store, and a non-snapshotted resource
 may safely fall back to the latest source file for a bounded TTL. No local host
 path appears in the resource URI or export receipt.
 
+`import_host_file` is the inverse path for a host-authorized native file
+reference. The tool advertises `openai/fileParams`, accepts the temporary
+download URL/file metadata supplied by the host, validates every redirect and
+resolved address, and writes only to a new workspace-relative destination.
+Arbitrary local source paths and overwrite-by-import are not supported.
+
+### Agent brief, patching, and diff checkpoints
+
+After selecting or switching a workspace, call `get_agent_brief`. It combines
+generic coding workflow guidance, current environment/workspace information,
+saved project memory, the progressive skill catalogue, and repository
+instructions. Project `AGENTS.override.md` / `AGENTS.md` content is appended
+last so repository-specific instructions have the highest project-level
+priority.
+
+`apply_patch` implements the Codex patch grammar (`*** Begin Patch`, add/delete/
+update/move actions and contextual hunks). Every path and update context is
+validated before the first filesystem mutation; paths cannot escape the active
+workspace.
+
+`show_diff` captures the complete working-tree snapshot through a temporary Git
+index (`GIT_INDEX_FILE` + `git add -A` + `git write-tree`), so untracked/deleted
+files and mode changes are represented without touching the user's staging
+area. `since=project_open` compares against the immutable selection checkpoint;
+`since=last_diff` compares against the private incremental cursor. The bounded
+patch is placed in component/widget metadata rather than model-visible
+structured output.
+
+### Generic MCP clients
+
+ChatGPT conversations use their stable hashed `openai/session` identity and
+persist bindings. Older/generic stateful MCP clients that lack that metadata
+receive a transport-session identity instead. Such a binding is intentionally
+transient: reconnecting creates a new unbound session, while any files already
+written to the chosen workspace remain untouched.
+
 ### MCP Apps
 
 The server exposes small self-contained setup and diff resources with MIME type
 `text/html;profile=mcp-app`. The setup app calls the same server-side
 `setup_status`, project-selection, scratch, and switch tools; it has no separate
-workspace state. `git_diff` carries diff-app metadata and remains usable as a
-normal text/structured MCP tool in clients that ignore MCP Apps metadata.
+workspace state. `show_diff` carries the diff-app/result metadata and remains
+usable as a normal MCP tool in clients that ignore MCP Apps metadata.
+
+`setup_status` also exposes a connector schema marker such as
+`0.6.0-dev+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
+echo the marker it currently holds; the server records the first observed
+conversation marker privately and reports `conversationStale` when the active
+server schema has changed.
 
 Validate configuration without starting the tunnel:
 

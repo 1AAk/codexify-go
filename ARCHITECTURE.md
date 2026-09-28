@@ -122,14 +122,14 @@ Current tools:
 
 - `list_projects`, `set_project_root`, `setup_ui_switch_project`,
   `setup_status`, `list_worktrees`;
-- `get_environment`;
-- `read_file`, `write_file`;
+- `get_environment`, `get_agent_brief`, `get_project_doc`;
+- `read_file`, `write_file`, `apply_patch`;
 - `glob`, `grep`;
 - `exec_command`, `write_stdin`;
-- `git_status`, `git_diff`, `git_log`;
+- `git_status`, `git_diff`, `show_diff`, `git_log`;
 - `remember`, `recall`, `update_memory_note`, `forget_memory_note`;
 - `skills_list`, `skills_read`;
-- `export_host_file`.
+- `export_host_file`, `import_host_file`.
 
 When at least one upstream is configured in `catalog` mode, the worker also
 registers `mcp_list_sources`, `mcp_search_tools`, `mcp_get_tool`, and
@@ -205,7 +205,9 @@ Supported exposure modes:
 - `catalog` (default): tools remain private and are discovered/called through
   four compact catalog tools;
 - `direct`: each upstream tool is proxied into the main MCP catalog using a
-  collision-safe sanitized name.
+  collision-safe sanitized name;
+- `gateway`: one compact downstream tool routes to all upstream functions and a
+  generated private `SKILL.md` exposes the exact function schemas progressively.
 
 Optional upstream failures are reported and skipped; `required=true` makes an
 upstream connection failure fail worker startup. Tool calls have a configured
@@ -238,12 +240,61 @@ either an immutable private snapshot or, when configured, a bounded-TTL safe
 source fallback. Snapshot count/total bytes and individual file size are
 bounded, and no local filesystem path is embedded in the public capability.
 
+Artifact ingress is a separate trust boundary. `import_host_file` accepts only
+host-authorized HTTPS file references, applies an explicit allowed-host policy,
+revalidates redirects and DNS results against loopback/private/link-local ranges,
+uses request/idle/size/concurrency limits, and creates a new destination only.
+
 Setup and diff surfaces are independent MCP App resources. Tool metadata points
 to self-contained `text/html;profile=mcp-app` documents with no external CSP
 dependencies. The setup app invokes server tools (`setup_status`, selection,
 switch, scratch) and therefore does not duplicate authoritative workspace
-state. The diff app currently renders `git_diff`; upstream Codexify's richer
-incremental `show_diff` checkpoint/review model remains a separate future layer.
+state. The diff app renders `show_diff` result metadata.
+
+## Agent brief and project instructions
+
+`get_agent_brief` is the post-selection handoff boundary. It renders generic
+coding workflow guidance, environment/workspace identity, saved memory and the
+skill catalogue first, then appends project-owned instructions last. Project
+documents are discovered from repository root to active workspace; each level
+prefers `AGENTS.override.md` over `AGENTS.md` and all documents share one byte
+budget. This ordering ensures repository-specific instructions override the
+generic agent brief without allowing user-state memory to masquerade as project
+instructions.
+
+## Patch and diff checkpoint model
+
+`apply_patch` preflights the complete patch before the first write: every source
+and destination resolves through the canonical workspace guard, update contexts
+must match, and duplicate targets are rejected. Add/delete/update/move actions
+then execute sequentially with an explicit partial-failure report if an OS write
+fails after preflight.
+
+Before mutation tools change a Git-backed workspace, the diff manager ensures a
+`project_open` checkpoint. Snapshots use a private temporary index and
+`git write-tree`, so user staging is never changed. Persistent ChatGPT owners use
+private Git refs for `project_open`/`last_diff`; transient transport owners use
+in-memory checkpoint state that is discarded with the MCP session. `show_diff`
+can inspect without advancing or atomically advance the private `last_diff`
+cursor after a successful comparison.
+
+## Hybrid MCP identity model
+
+The HTTP endpoint routes current protocol/discovery requests through stateless
+Streamable HTTP. Legacy stateful sessions receive a server `Mcp-Session-Id`.
+When no stable `openai/session` metadata is present, that ID is domain-separated
+and hashed into a non-persistent transport identity. Workspace and diff state are
+removed when the server session closes; a reconnect therefore cannot silently
+inherit the previous selection.
+
+## Connector schema bookkeeping
+
+The runtime publishes a compact connector marker built from the release version
+and schema-changing feature suffixes (`workspace`, artifact ingress, gateway).
+Tunnel-scoped and first-observed conversation markers are persisted privately
+under the interactive user's state directory. `setup_status` compares those
+markers and exposes `conversationStale`; this is UI/reload bookkeeping, not an
+authentication mechanism.
 
 ## Windows process and identity model
 
@@ -284,15 +335,12 @@ account name or profile path.
 
 ## Roadmap
 
-### Phase 6: remaining Codexify compatibility
+### Remaining Codexify compatibility
 
-- ChatGPT artifact ingress / attachment materialization;
-- full `show_diff` immutable project-open + incremental checkpoint engine,
-  binary/untracked metadata, and review cursor behavior;
-- transport-session workspace fallback for clients without `openai/session`;
-- plugin-contributed skills / optional Claude skill roots;
-- MCP gateway mode and generated gateway skills;
-- connector-schema migration/version status parity;
+- installed Codex/Claude plugin skill discovery and optional Claude skill roots;
+- fuller upstream connector-schema discovery/reload migration history and public
+  update-status checks;
+- Markdown-chat / agent-ticket product surfaces;
 - automatic tunnel-client acquisition/update and self-update UX.
 
 ## Upstream reference
