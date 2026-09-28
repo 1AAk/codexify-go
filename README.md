@@ -323,7 +323,7 @@ workspace state. `show_diff` carries the diff-app/result metadata and remains
 usable as a normal MCP tool in clients that ignore MCP Apps metadata.
 
 `setup_status` also exposes a connector schema marker such as
-`0.8.0+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
+`0.8.1+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
 echo the marker it currently holds; the server records the first observed
 conversation marker privately and reports `conversationStale` when the active
 server schema has changed.
