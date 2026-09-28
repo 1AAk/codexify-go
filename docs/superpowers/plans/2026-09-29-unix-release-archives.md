@@ -4,7 +4,7 @@
 
 **Goal:** Publish Windows releases as ZIP and macOS/Linux releases as tar.gz while keeping self-update secure and compatible.
 
-**Architecture:** Archive naming is selected from GOOS in the self-update release contract. Extraction dispatches by archive suffix: existing ZIP logic remains for Windows, while a bounded gzip+tar reader handles Unix archives. The release workflow mirrors the same naming rules and checksum contract.
+**Architecture:** Archive naming is selected from GOOS in the self-update release contract. Extraction dispatches by archive suffix: existing ZIP logic remains for Windows, while a bounded gzip+tar reader handles Unix archives. The release workflow publishes tar.gz as the preferred Unix format plus ZIP compatibility assets so already-published Unix updaters that inspect only `releases/latest` retain a valid update path.
 
 **Tech Stack:** Go standard library (`archive/zip`, `archive/tar`, `compress/gzip`), GitHub Actions, Go tests.
 
@@ -38,6 +38,7 @@
 - [ ] Extend the workflow-contract test to require conditional ZIP/tar.gz packaging and both publish globs.
 - [ ] Run the contract test and verify it fails against the all-ZIP workflow.
 - [ ] Update the build step to package Windows with ZIP and Darwin/Linux with tar.gz; generate basename-only SHA-256 sidecars for either format.
+- [ ] Also package Darwin/Linux ZIP compatibility assets so older self-updaters that request ZIP from `releases/latest` remain functional.
 - [ ] Update publish aggregation to consume both sidecar types and upload `*.zip` plus `*.tar.gz`.
 - [ ] Re-run the contract test and verify it passes.
 

@@ -12,7 +12,7 @@ The naming pattern remains `codexify-go-v<version>-<os>-<arch>.<ext>`.
 
 ## Compatibility
 
-Published releases are immutable. Existing `v0.8.1` ZIP assets remain valid and are not rewritten. The self-updater selects the archive format from the current OS for future releases; no migration of old release assets is required.
+Published releases are immutable. Existing `v0.8.1` ZIP assets remain valid and are not rewritten. Because older Unix updaters query only `releases/latest` and request ZIP, Darwin/Linux continue to publish a ZIP compatibility asset alongside the preferred tar.gz artifact. New updaters select tar.gz; compatibility ZIPs prevent stale clients from losing the self-update path after later releases become latest.
 
 ## Self-updater
 
@@ -28,7 +28,7 @@ The staged binary is still written by Codexify Go with executable permissions, s
 
 ## Release workflow
 
-The GitHub Release workflow packages Windows with `zip` and Darwin/Linux with `tar -czf`. `checksums.txt` contains basenames only and covers all six platform archives. The publish step uploads both `*.zip` and `*.tar.gz`.
+The GitHub Release workflow packages Windows with `zip` and Darwin/Linux with `tar -czf`, plus a ZIP compatibility asset for each Unix target. `checksums.txt` contains basenames only and covers every published archive. The publish step uploads both `*.zip` and `*.tar.gz`.
 
 ## Documentation
 

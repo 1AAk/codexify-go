@@ -330,7 +330,10 @@ starts re-hash the binary and re-run compatibility checks before use.
 Release checks query the repository's stable GitHub release endpoint with a
 short process cache and optional forced refresh. Preparing an update requires
 the exact OS/architecture archive and `checksums.txt`; archive SHA-256 is
-verified before extraction/staging. Windows cannot replace the running EXE, so
+verified before extraction/staging. Windows release archives are ZIP files;
+Darwin and Linux use gzip-compressed tar archives. Tar extraction accepts only
+the exact expected regular binary entry and applies the same binary-size bound
+as ZIP extraction. Windows cannot replace the running EXE, so
 `update apply` starts a detached copy of the current executable in update-worker
 mode, stops the service if necessary, waits for the old PID, replaces the
 target, and optionally restarts the service. Update application is never an
@@ -363,10 +366,15 @@ replace the host binary. Installation remains an explicit host CLI action.
 
 GitHub Actions tests native Windows/Linux/macOS runners and cross-builds the
 release target set with `CGO_ENABLED=0`. Stable tag releases package exact
-OS/architecture zip names and aggregate their SHA-256 values into
-`checksums.txt`, matching the self-update client's asset contract. The workflow
-is publishing infrastructure, not by itself evidence of Linux runtime/service
-parity. macOS ARM64 additionally has live lifecycle validation on Apple Silicon.
+OS/architecture archives: ZIP for Windows and tar.gz for Darwin/Linux. Their
+SHA-256 values are aggregated into `checksums.txt`, matching the self-update
+client's asset contract. `v0.8.1` remains an immutable historical all-ZIP
+release. New Unix updaters select tar.gz, while Darwin/Linux releases also carry
+ZIP compatibility assets because older updaters request ZIP from
+`releases/latest`. Keeping those aliases avoids stranding stale installations
+when a newer release becomes latest. The workflow is publishing infrastructure,
+not by itself evidence of Linux runtime/service parity. macOS ARM64 additionally
+has live lifecycle validation on Apple Silicon.
 
 ## macOS LaunchAgent lifecycle
 

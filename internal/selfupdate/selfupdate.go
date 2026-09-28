@@ -1,8 +1,10 @@
 package selfupdate
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -163,7 +165,7 @@ func Prepare(ctx context.Context, current, baseDir string) (Prepared, error) {
 	if actual != expected {
 		return Prepared{}, errors.New("release archive SHA-256 does not match checksums.txt")
 	}
-	binary, err := extractBinary(archive, binaryName)
+	binary, err := extractBinary(archive, archiveName, binaryName)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -277,22 +279,25 @@ func fetch(ctx context.Context, rawURL string, max int64) ([]byte, error) {
 }
 
 func releaseNames(version string) (string, string, error) {
-	osName := runtime.GOOS
+	return releaseNamesFor(version, runtime.GOOS, runtime.GOARCH)
+}
+
+func releaseNamesFor(version, osName, arch string) (string, string, error) {
 	switch osName {
 	case "windows", "linux":
 	case "darwin":
 	default:
 		return "", "", fmt.Errorf("self-update release has no target for OS %s", osName)
 	}
-	arch := runtime.GOARCH
 	if arch != "amd64" && arch != "arm64" {
 		return "", "", fmt.Errorf("self-update release has no target for architecture %s", arch)
 	}
 	binary := "codexify-go"
 	if osName == "windows" {
 		binary += ".exe"
+		return fmt.Sprintf("codexify-go-v%s-%s-%s.zip", version, osName, arch), binary, nil
 	}
-	return fmt.Sprintf("codexify-go-v%s-%s-%s.zip", version, osName, arch), binary, nil
+	return fmt.Sprintf("codexify-go-v%s-%s-%s.tar.gz", version, osName, arch), binary, nil
 }
 
 func assetURL(rel release, name string) string {
@@ -320,7 +325,18 @@ func checksumFor(data []byte, filename string) (string, error) {
 	return "", fmt.Errorf("checksums.txt has no SHA-256 for %s", filename)
 }
 
-func extractBinary(archive []byte, binaryName string) ([]byte, error) {
+func extractBinary(archive []byte, archiveName, binaryName string) ([]byte, error) {
+	switch {
+	case strings.HasSuffix(archiveName, ".zip"):
+		return extractZipBinary(archive, binaryName)
+	case strings.HasSuffix(archiveName, ".tar.gz"):
+		return extractTarGzipBinary(archive, binaryName)
+	default:
+		return nil, fmt.Errorf("unsupported release archive format: %s", archiveName)
+	}
+}
+
+func extractZipBinary(archive []byte, binaryName string) ([]byte, error) {
 	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
 		return nil, err
@@ -340,6 +356,43 @@ func extractBinary(archive []byte, binaryName string) ([]byte, error) {
 		_ = rc.Close()
 		if readErr != nil {
 			return nil, readErr
+		}
+		if len(data) > maxBinaryBytes {
+			return nil, errors.New("release binary exceeds 64 MiB")
+		}
+		return data, nil
+	}
+	return nil, fmt.Errorf("release archive does not contain %s", binaryName)
+}
+
+func extractTarGzipBinary(archive []byte, binaryName string) ([]byte, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+
+	reader := tar.NewReader(gz)
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if header.Name != binaryName {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			return nil, errors.New("release binary is not a regular file")
+		}
+		if header.Size < 0 || header.Size > maxBinaryBytes {
+			return nil, errors.New("release binary is not a bounded regular file")
+		}
+		data, err := io.ReadAll(io.LimitReader(reader, maxBinaryBytes+1))
+		if err != nil {
+			return nil, err
 		}
 		if len(data) > maxBinaryBytes {
 			return nil, errors.New("release binary exceeds 64 MiB")

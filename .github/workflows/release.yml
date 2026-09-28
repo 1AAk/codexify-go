@@ -78,13 +78,26 @@ jobs:
           binary="codexify-go${ext}"
           CGO_ENABLED=0 GOOS="$GOOS_TARGET" GOARCH="$GOARCH_TARGET" \
             go build -trimpath -ldflags "-s -w" -o "dist/package/$binary" ./cmd/codexify-go
-          archive="codexify-go-v${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip"
-          (cd dist/package && zip -9 "../$archive" "$binary")
+          if [[ "$GOOS_TARGET" == windows ]]; then
+            archive="codexify-go-v${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip"
+            (cd dist/package && zip -9 "../$archive" "$binary")
+          else
+            archive="codexify-go-v${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.tar.gz"
+            (cd dist/package && tar -czf "../$archive" "$binary")
+            # Older Unix updaters request ZIP from releases/latest. Keep a ZIP
+            # compatibility asset while tar.gz remains the preferred format.
+            legacy_archive="codexify-go-v${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip"
+            (cd dist/package && zip -9 "../$legacy_archive" "$binary")
+            (cd dist && sha256sum "$legacy_archive" > "$legacy_archive.sha256")
+          fi
           (cd dist && sha256sum "$archive" > "$archive.sha256")
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
           if-no-files-found: error
 
   publish:
@@ -100,8 +113,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat dist/*.zip.sha256 | sort -k2 > dist/checksums.txt
-          rm dist/*.zip.sha256
+          cat dist/*.sha256 | sort -k2 > dist/checksums.txt
+          rm dist/*.sha256
           cat dist/checksums.txt
       - uses: softprops/action-gh-release@v3
         with:
@@ -111,4 +124,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.zip
+            dist/*.tar.gz
             dist/checksums.txt

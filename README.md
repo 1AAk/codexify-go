@@ -405,12 +405,21 @@ the updater:
 ```text
 codexify-go-vX.Y.Z-windows-amd64.zip
 codexify-go-vX.Y.Z-windows-arm64.zip
-codexify-go-vX.Y.Z-linux-amd64.zip
-codexify-go-vX.Y.Z-linux-arm64.zip
-codexify-go-vX.Y.Z-darwin-amd64.zip
-codexify-go-vX.Y.Z-darwin-arm64.zip
+codexify-go-vX.Y.Z-linux-amd64.tar.gz
+codexify-go-vX.Y.Z-linux-arm64.tar.gz
+codexify-go-vX.Y.Z-darwin-amd64.tar.gz
+codexify-go-vX.Y.Z-darwin-arm64.tar.gz
 checksums.txt
 ```
+
+Windows uses ZIP; macOS and Linux use gzip-compressed tar archives so Unix
+release artifacts follow the native CLI distribution convention. The updater
+supports both formats and still verifies the archive SHA-256 before extraction.
+Published releases are immutable: `v0.8.1` remains the historical all-ZIP
+release. New Unix updaters prefer tar.gz, while releases also publish ZIP
+compatibility assets for Darwin/Linux. Older updaters query only
+`releases/latest` and request ZIP, so retaining those compatibility assets keeps
+their self-update path valid even after newer releases become latest.
 
 The release contract is regression-tested against the self-updater. Successful
 cross-compilation is not treated as runtime validation for Linux. macOS ARM64 is
