@@ -11,7 +11,7 @@ Scheduled Task on Windows. `codexify-go` starts from a different boundary:
 Windows SCM owns the durable supervisor, and child runtimes are explicitly
 monitored.
 
-## Phase 1 topology
+## Current topology (Phase 1 + Phase 2)
 
 ```text
 Windows SCM
@@ -20,6 +20,14 @@ Windows SCM
 codexify-go.exe service run
     |
     +-- structured logger
+    |
+    +-- Streamable HTTP MCP server
+    |     |
+    |     +-- generated internal bearer auth
+    |     +-- workspace confinement
+    |     +-- filesystem/search tools
+    |     +-- exec session manager
+    |     +-- Git tools
     |
     +-- supervisor
           |
@@ -75,6 +83,31 @@ by Codexify:
 The tunnel health URL file contains a loopback base URL. The supervisor appends
 `/readyz` and rejects non-loopback health URLs.
 
+The local MCP endpoint is also restricted to an explicit loopback HTTP URL.
+When authentication is enabled, the parent generates a random bearer on every
+start, injects it into the tunnel process environment, and configures the
+tunnel's local `Authorization` header through an `env:` reference. The bearer
+does not live in the JSON configuration.
+
+## MCP protocol
+
+Phase 2 uses the official `github.com/modelcontextprotocol/go-sdk/mcp` server
+rather than maintaining a private JSON-RPC implementation. The HTTP handler is
+stateless, which lets the official SDK negotiate the current MCP revision while
+remaining compatible with older Streamable HTTP clients.
+
+Current tools:
+
+- `get_environment`;
+- `read_file`, `write_file`;
+- `glob`, `grep`;
+- `exec_command`, `write_stdin`;
+- `git_status`, `git_diff`, `git_log`.
+
+All path-taking tools resolve against one configured workspace root. Absolute
+paths and `..` escapes are rejected, and symlink resolution is checked against
+the canonical root before access.
+
 ## Windows process model
 
 Child processes are created with `CREATE_NO_WINDOW` and
@@ -122,19 +155,10 @@ deferred until the MCP core is implemented and tested.
 
 ## Roadmap
 
-### Phase 2: MCP core
+### Phase 3: user-context worker and workspace compatibility
 
-- Streamable HTTP MCP transport;
-- local bearer authentication;
-- `/health`;
-- tool registry;
-- safe workspace root;
-- `read_file`, `write_file`, `glob`, `grep`;
-- command sessions;
-- Git status/diff/log.
-
-### Phase 3: workspace compatibility
-
+- authenticated supervisor <-> user-worker IPC;
+- launch developer tools under the logged-in user rather than LocalSystem;
 - multi-project catalogue;
 - conversation binding;
 - safe project selection;

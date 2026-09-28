@@ -9,7 +9,7 @@ The project is inspired by
 licensed. This repository is an independent implementation, not a line-by-line
 port and not yet a drop-in replacement.
 
-## Phase 1
+## Current status
 
 Implemented:
 
@@ -26,12 +26,23 @@ Implemented:
 - JSON structured logging;
 - foreground mode for debugging;
 - `doctor` checks;
-- unit and Windows process integration tests.
+- unit and Windows process integration tests;
+- official MCP Go SDK (`modelcontextprotocol/go-sdk` v1.7.0);
+- stateless Streamable HTTP MCP transport with current-protocol negotiation and
+  backwards compatibility;
+- localhost-only MCP endpoint validation and request-size limits;
+- generated per-process bearer authentication between the tunnel runtime and
+  local MCP server (the secret is not stored in config);
+- `/health` endpoint;
+- workspace-root confinement, including traversal and symlink-boundary checks;
+- `get_environment`;
+- `read_file` / `write_file`;
+- recursive `glob` and regex `grep`;
+- `exec_command` with long-running sessions and `write_stdin`;
+- `git_status`, `git_diff`, and `git_log`.
 
 Not implemented yet:
 
-- Streamable HTTP MCP server;
-- Codex-compatible filesystem/Git/exec tools;
 - MCP server aggregation;
 - conversation-to-workspace binding;
 - managed Git worktrees;
@@ -39,6 +50,19 @@ Not implemented yet:
 - ChatGPT setup widgets and diff UI;
 - automatic download/update of `tunnel-client-runtime`;
 - self-update.
+
+The Phase 2 MCP core has been exercised with both raw MCP requests and the
+official Go MCP client. An end-to-end Windows SCM smoke test also verifies:
+
+```text
+Windows SCM
+  -> codexify-go MCP server
+  -> generated internal bearer auth
+  -> fake tunnel runtime
+  -> child kill
+  -> supervised restart
+  -> MCP re-authentication
+```
 
 ## Build
 
@@ -59,10 +83,17 @@ Copy-Item config.example.json config.local.json
 
 Set:
 
+- `mcp.workspaceRoot` to the directory this instance is allowed to access;
 - `tunnel.executable` to OpenAI's official `tunnel-client-runtime.exe`;
 - `tunnel.tunnelId`;
 - `tunnel.apiKeyRef` to an `env:NAME` or `file:C:\...` reference;
 - `tunnel.mcpServerUrl` to the local MCP endpoint.
+
+`tunnel.mcpServerUrl` must be an explicit loopback HTTP URL such as
+`http://127.0.0.1:3300/mcp/tunnel_<id>`. When `mcp.authEnabled` is true (the
+default), `codexify-go` generates a random bearer token at process start and
+passes it to the tunnel child through an environment reference. It is never
+written to `config.local.json`.
 
 Do not put the OpenAI tunnel API key itself in Git.
 
@@ -99,15 +130,17 @@ Removal:
 The service is deliberately named `CodexifyGo` by default so it does not touch
 or conflict with an installed Rust Codexify service.
 
-## Service-account boundary
+## Important service-account limitation
 
-SCM services run outside the logged-in desktop session. Phase 1 only supervises
-the tunnel and is compatible with this model. A future full MCP implementation
-must not blindly move all developer operations into LocalSystem: Git credential
-manager state, SSH agents, DPAPI secrets and other per-user resources belong to
-the user session.
+SCM services run outside the logged-in desktop session. The MCP core now runs
+inside the service, so filesystem tools work, but `exec_command` and Git also
+run as the service account (currently LocalSystem). That is intentionally **not
+yet considered a drop-in replacement** for the Rust Codexify service: Git
+Credential Manager state, SSH agents, DPAPI secrets and other per-user resources
+belong to the user session.
 
-The planned architecture therefore separates a system-level lifecycle
-supervisor from a user-context MCP worker where user identity is required.
+The next lifecycle milestone is therefore a small authenticated user-context
+worker controlled by the SCM supervisor. Until that exists, keep the current
+Rust Codexify installation for real developer workflows.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).
