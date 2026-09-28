@@ -95,16 +95,36 @@ Implemented:
 - upstream MCP `gateway` mode: one compact gateway tool plus a generated
   `SKILL.md` containing the upstream function list and exact input schemas;
 - tunnel-scoped connector schema markers surfaced by `setup_status`, including
-  per-conversation stale-version detection for setup/reload UX.
+  per-conversation stale-version detection for setup/reload UX;
+- installed Codex plugin skill discovery from `CODEX_HOME`/`~/.codex/config.toml`
+  and the enabled plugin cache, including plugin manifests, active-version
+  selection, per-skill enable rules, and namespaced `<plugin>:<skill>` names;
+- opt-in Claude Code skill/plugin discovery (`skills.claudePlugins=true`) using
+  `.claude/skills` and the installed plugin registry with user/managed/project/
+  local scope applicability;
+- managed OpenAI tunnel runtime installation when `tunnel.executable` is omitted:
+  pinned `tunnel-client-runtime v0.0.12`, per-platform archive SHA-256, private
+  versioned install directory, binary integrity manifest, and compatibility
+  probes before use;
+- `codexify-go update check` and `update apply`: stable GitHub release discovery,
+  checksummed release archives, staged extraction, and a Windows helper process
+  for replacement after the running process exits/restarting the service;
+- optional Markdown chat (`agentChat.enabled`) with append-only `CHAT.md`,
+  persistent per-conversation read cursors, `chat_read`, `chat_write`, and
+  bounded `chat_await`;
+- optional experimental agent tickets (`experimental.agentTickets`) that add a
+  serial one-time ticket chain to model-facing tools, persist conversation
+  ownership across transports, reject stale/concurrent branches before tool
+  execution, and allow bounded offline recovery.
 
 Not implemented yet:
 
-- plugin-contributed skills and optional Claude skill discovery;
-- full upstream connector-schema discovery/reload migration history and bounded
-  public release/update checks (the local schema marker/stale status is present);
-- upstream Markdown-chat / agent-ticket product surfaces;
-- automatic download/update of `tunnel-client-runtime`;
-- self-update.
+- full upstream ChatGPT widget/UI parity for Markdown chat and self-update
+  confirmation cards (the server/tool/state contracts are implemented);
+- automatic migration of older third-party connector schema histories beyond
+  the current tunnel/conversation marker model;
+- release publishing/CI that produces the archive names and `checksums.txt`
+  consumed by `update apply` (the client-side updater is implemented).
 
 The MCP core has been exercised with both raw MCP requests and the official Go
 MCP client. End-to-end Windows SCM smoke tests verify the user-context lifecycle
@@ -135,6 +155,11 @@ get_agent_brief -> gateway skill + AGENTS.md at highest project priority
 apply_patch -> show_diff(project_open) -> apply_patch -> show_diff(last_diff)
 host file reference -> HTTPS ingress -> new workspace file
 legacy stateful MCP session -> transient project binding -> disconnect -> forgotten
+
+installed Codex plugin registry -> active plugin version -> namespaced skills
+Markdown CHAT.md -> chat_read/write/await -> persistent conversation cursor
+first model-facing call -> new_codexify_ticket -> serial ticket chain -> stale call rejected
+managed tunnel install -> pinned archive SHA -> binary verify -> compatibility probe
 ```
 
 ## Build
@@ -299,10 +324,72 @@ workspace state. `show_diff` carries the diff-app/result metadata and remains
 usable as a normal MCP tool in clients that ignore MCP Apps metadata.
 
 `setup_status` also exposes a connector schema marker such as
-`0.6.0-dev+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
+`0.7.0-dev+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
 echo the marker it currently holds; the server records the first observed
 conversation marker privately and reports `conversationStale` when the active
 server schema has changed.
+
+### Installed plugin skills
+
+With the default skill roots, installed Codex plugins are discovered from the
+effective Codex home (`CODEX_HOME` or `~/.codex`). Only plugins enabled by
+`config.toml` are considered; cached but uninstalled/disabled plugin versions
+are not blindly scanned. `local` wins version selection, otherwise semantic
+versions are ordered before falling back to lexical ordering. Agent Plugin and
+legacy plugin manifests define the namespace/skill roots, and Codex
+`[[skills.config]]` enable rules are applied to the resulting qualified skills.
+
+Claude plugin discovery is deliberately opt-in. When enabled, Codexify Go reads
+`~/.claude/plugins/installed_plugins.json`, selects only an installation whose
+scope applies to the active workspace, and does not fall back to stale cache
+directories that are absent from the registry.
+
+### Managed tunnel runtime and updates
+
+`tunnel.executable` remains an explicit override. When omitted, the managed
+runtime lives below `tunnel.managedDir` in a versioned directory. Install it or
+verify it with:
+
+```text
+codexify-go tunnel install --config config.json
+codexify-go tunnel status --config config.json
+codexify-go tunnel verify --config config.json
+```
+
+The current runtime is pinned to OpenAI `tunnel-client-runtime v0.0.12`; the
+archive hash table matches upstream Codexify and the installed binary is also
+hashed into a private manifest. `--version` and `run --help` are executed before
+the runtime is accepted, including checks for the MCP/auth/health flags used by
+Codexify Go.
+
+Self-update is explicit rather than automatic:
+
+```text
+codexify-go update check --force
+codexify-go update apply --config config.json
+```
+
+`check` is read-only and cached unless forced. `apply` requires a newer stable
+GitHub release containing the exact platform archive plus `checksums.txt`,
+verifies SHA-256 before staging, and on Windows delegates replacement to a
+detached helper that waits for the old PID to exit. No release means no change.
+
+### Markdown chat and agent tickets
+
+When Markdown chat is enabled, its `CHAT.md` lives in private user state keyed
+by workspace and conversation rather than inside the Git repository. User text
+is append-only; agent messages are written only through `chat_write` and are
+filtered from subsequent `chat_read` results. Persistent conversations retain a
+private cursor; transient transport identities keep it in memory only.
+
+Agent tickets are an optional experimental concurrency guard. The first
+model-facing tool call omits `codexify_ticket` and receives
+`new_codexify_ticket`; every subsequent call must supply the latest value. A
+successful call or accepted tool-error advances the ticket. Reuse of an older
+ticket, concurrent ownership, or a duplicated agent branch is rejected before
+the underlying tool executes. Persistent tickets use locked private files so
+the chain survives reconnects/processes; anonymous transport tickets stay
+memory-scoped.
 
 Validate configuration without starting the tunnel:
 

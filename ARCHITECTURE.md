@@ -232,6 +232,13 @@ the body and package resources are read only after a skill is chosen. Resource
 resolution is package-confined and rejects absolute paths, `..`, and symlink
 escapes. Client-visible skill paths are scope-relative instead of host-absolute.
 
+Installed plugin discovery is registry/config driven rather than a cache sweep.
+Codex plugins come from the effective Codex configuration and active plugin
+cache version; plugin manifests define the namespace and roots. Claude plugin
+discovery is opt-in and uses the installed registry plus workspace-aware scope
+selection. Both sources are merged after repo/user roots with duplicate-name
+suppression and retain package-confined resource reads.
+
 ## Artifact egress and MCP Apps
 
 `export_host_file` resolves a workspace-relative regular file through the same
@@ -296,6 +303,49 @@ under the interactive user's state directory. `setup_status` compares those
 markers and exposes `conversationStale`; this is UI/reload bookkeeping, not an
 authentication mechanism.
 
+Markdown chat and agent-ticket feature flags are schema-changing suffixes
+(`markdown-chat-v5`, `tickets-v1`) so an older connector/conversation can be
+prompted to reload when those tool contracts appear or disappear.
+
+## Managed tunnel runtime
+
+An explicit `tunnel.executable` is never replaced by managed-runtime logic. If
+it is absent, Codexify Go resolves a private versioned runtime below
+`tunnel.managedDir`. The supported platform selects a compile-time pinned OpenAI
+release asset and archive SHA-256. Installation downloads only HTTPS GitHub
+release hosts, bounds archive/binary sizes, verifies the pinned archive digest,
+extracts the exact expected member, atomically writes the binary and integrity
+manifest, then probes `--version` and required `run --help` flags. Subsequent
+starts re-hash the binary and re-run compatibility checks before use.
+
+## Self-update
+
+Release checks query the repository's stable GitHub release endpoint with a
+short process cache and optional forced refresh. Preparing an update requires
+the exact OS/architecture archive and `checksums.txt`; archive SHA-256 is
+verified before extraction/staging. Windows cannot replace the running EXE, so
+`update apply` starts a detached copy of the current executable in update-worker
+mode, stops the service if necessary, waits for the old PID, replaces the
+target, and optionally restarts the service. Update application is never an
+implicit background side effect.
+
+## Markdown chat and agent tickets
+
+Markdown chat state is private per `(workspace, conversation identity)`. The
+file is append-only while active; a cursor stores byte offset plus an anchor so
+rewrites/truncation are detected instead of silently reread. Agent-authored
+marker blocks are excluded from user-text reads. `chat_await` polls only until a
+server-configured bound and can also observe workspace selection/change.
+
+Experimental agent tickets are middleware around model-facing MCP tools. Input
+and output schemas are augmented without breaking upstream local `$ref` or
+colliding fields (an arguments/result envelope is introduced when required).
+Persistent ChatGPT identities use locked ticket files; transient identities use
+per-manager memory. Reservation happens before dispatch and commit advances the
+ticket after the call, preventing concurrent or replayed branches from executing
+the protected operation. A bounded offline threshold allows recovery only when
+no reservation is in flight.
+
 ## Windows process and identity model
 
 Tunnel children are created with `CREATE_NO_WINDOW` and
@@ -337,11 +387,10 @@ account name or profile path.
 
 ### Remaining Codexify compatibility
 
-- installed Codex/Claude plugin skill discovery and optional Claude skill roots;
-- fuller upstream connector-schema discovery/reload migration history and public
-  update-status checks;
-- Markdown-chat / agent-ticket product surfaces;
-- automatic tunnel-client acquisition/update and self-update UX.
+- richer ChatGPT-specific Markdown-chat/self-update widget parity;
+- migration of historical third-party connector schema state beyond the current
+  tunnel/conversation marker model;
+- release/CI publishing pipeline for the already-implemented self-update client.
 
 ## Upstream reference
 
