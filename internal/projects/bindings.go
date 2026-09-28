@@ -18,6 +18,7 @@ const (
 type Binding struct {
 	Version           int    `json:"version"`
 	IdentityHash      string `json:"identityHash"`
+	Scope             string `json:"bindingScope,omitempty"`
 	Mode              string `json:"mode,omitempty"`
 	SourceProjectRoot string `json:"sourceProjectRoot"`
 	ProjectRoot       string `json:"projectRoot"`
@@ -33,6 +34,19 @@ type Binding struct {
 func (m *Manager) readBinding(identity *Identity) (*Binding, error) {
 	if identity == nil {
 		return nil, nil
+	}
+	if !identity.Persistent {
+		m.transientMu.RLock()
+		binding, ok := m.transientBindings[identity.Key]
+		m.transientMu.RUnlock()
+		if !ok {
+			return nil, nil
+		}
+		if _, err := os.Stat(binding.ProjectRoot); err != nil {
+			return nil, fmt.Errorf("bound project is no longer available: %w", err)
+		}
+		copyBinding := binding
+		return &copyBinding, nil
 	}
 	path := m.bindingPath(identity)
 	data, err := os.ReadFile(path)
@@ -55,7 +69,18 @@ func (m *Manager) readBinding(identity *Identity) (*Binding, error) {
 	return binding, nil
 }
 
-func (m *Manager) writeBinding(binding Binding) error {
+func (m *Manager) writeBinding(identity *Identity, binding Binding) error {
+	if identity == nil {
+		return errors.New("binding identity is required")
+	}
+	binding.IdentityHash = identity.Key
+	binding.Scope = identity.Scope
+	if !identity.Persistent {
+		m.transientMu.Lock()
+		m.transientBindings[identity.Key] = binding
+		m.transientMu.Unlock()
+		return nil
+	}
 	if err := os.MkdirAll(m.cfg.BindingsDir, 0o700); err != nil {
 		return err
 	}
@@ -93,6 +118,9 @@ func decodeBinding(data []byte) (*Binding, error) {
 	if binding.Mode == "" {
 		binding.Mode = "project"
 	}
+	if binding.Scope == "" {
+		binding.Scope = "chatgpt_conversation"
+	}
 	if binding.ProjectRoot == "" {
 		return nil, errors.New("project binding is missing projectRoot")
 	}
@@ -104,24 +132,34 @@ func (m *Manager) bindingPath(identity *Identity) string {
 }
 
 func (m *Manager) sourceInUse(source string, identity *Identity) bool {
-	entries, err := os.ReadDir(m.cfg.BindingsDir)
-	if err != nil {
-		return false
-	}
 	source = cleanComparable(source)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
-			continue
+	if entries, err := os.ReadDir(m.cfg.BindingsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(m.cfg.BindingsDir, entry.Name()))
+			if err != nil {
+				continue
+			}
+			var binding Binding
+			if json.Unmarshal(data, &binding) != nil {
+				continue
+			}
+			if identity != nil && binding.IdentityHash == identity.Key {
+				continue
+			}
+			if binding.Mode != "scratch" && cleanComparable(binding.SourceProjectRoot) == source {
+				if _, err := os.Stat(binding.ProjectRoot); err == nil {
+					return true
+				}
+			}
 		}
-		data, err := os.ReadFile(filepath.Join(m.cfg.BindingsDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		var binding Binding
-		if json.Unmarshal(data, &binding) != nil {
-			continue
-		}
-		if identity != nil && binding.IdentityHash == identity.Key {
+	}
+	m.transientMu.RLock()
+	defer m.transientMu.RUnlock()
+	for key, binding := range m.transientBindings {
+		if identity != nil && key == identity.Key {
 			continue
 		}
 		if binding.Mode != "scratch" && cleanComparable(binding.SourceProjectRoot) == source {

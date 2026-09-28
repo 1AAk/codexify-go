@@ -17,6 +17,11 @@ type Manager struct {
 	cfg    config.MCPConfig
 	access *workspace.Root
 	mu     sync.Mutex
+
+	transientMu       sync.RWMutex
+	transientBindings map[string]Binding
+	transientChanges  map[string]WorkspaceChange
+	transientHistory  map[string][]Binding
 }
 
 type WorkspaceInfo struct {
@@ -64,7 +69,13 @@ func New(cfg config.MCPConfig) (*Manager, error) {
 	if strings.TrimSpace(cfg.Worktrees.Mode) == "" {
 		cfg.Worktrees.Mode = "auto"
 	}
-	return &Manager{cfg: cfg, access: access}, nil
+	return &Manager{
+		cfg:               cfg,
+		access:            access,
+		transientBindings: make(map[string]Binding),
+		transientChanges:  make(map[string]WorkspaceChange),
+		transientHistory:  make(map[string][]Binding),
+	}, nil
 }
 
 func (m *Manager) AccessRoot() *workspace.Root {
@@ -127,7 +138,7 @@ func (m *Manager) Workspace(meta map[string]any) (*workspace.Root, WorkspaceInfo
 	}
 	identity := IdentityFromMeta(meta)
 	if identity == nil {
-		return nil, WorkspaceInfo{}, errors.New("no ChatGPT conversation identity in request metadata; call list_projects/set_project_root from a ChatGPT conversation or disable multiProject")
+		return nil, WorkspaceInfo{}, errors.New("no ChatGPT conversation or MCP transport-session identity is available; call set_project_root from a stateful MCP session or disable multiProject")
 	}
 	binding, err := m.readBinding(identity)
 	if err != nil {
@@ -146,7 +157,7 @@ func (m *Manager) Workspace(meta map[string]any) (*workspace.Root, WorkspaceInfo
 func (m *Manager) Select(meta map[string]any, selector string, createWorktree *bool) (WorkspaceInfo, error) {
 	identity := IdentityFromMeta(meta)
 	if m.cfg.MultiProject && identity == nil {
-		return WorkspaceInfo{}, errors.New("set_project_root requires _meta[openai/session] in multi-project mode")
+		return WorkspaceInfo{}, errors.New("set_project_root requires a ChatGPT conversation identity or stateful MCP transport session in multi-project mode")
 	}
 	if !m.cfg.MultiProject {
 		return WorkspaceInfo{
@@ -263,6 +274,7 @@ func (m *Manager) Select(meta map[string]any, selector string, createWorktree *b
 	binding := Binding{
 		Version:           bindingVersion,
 		IdentityHash:      identity.Key,
+		Scope:             identity.Scope,
 		Mode:              "project",
 		SourceProjectRoot: source,
 		ProjectRoot:       activeRoot,
@@ -274,7 +286,7 @@ func (m *Manager) Select(meta map[string]any, selector string, createWorktree *b
 		WorktreesRoot:     m.cfg.Worktrees.Root,
 		CreatedAt:         time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if err := m.writeBinding(binding); err != nil {
+	if err := m.writeBinding(identity, binding); err != nil {
 		if managed {
 			_ = removeManagedWorktree(gitRoot, worktreeGitRoot)
 		}
@@ -289,6 +301,10 @@ func infoFromBinding(m *Manager, binding Binding, newly bool) WorkspaceInfo {
 	if mode == "" {
 		mode = "project"
 	}
+	scope := binding.Scope
+	if scope == "" {
+		scope = "chatgpt_conversation"
+	}
 	return WorkspaceInfo{
 		Mode:              mode,
 		AccessRoot:        m.access.Path(),
@@ -302,8 +318,20 @@ func infoFromBinding(m *Manager, binding Binding, newly bool) WorkspaceInfo {
 		WorktreesRoot:     binding.WorktreesRoot,
 		WorktreeMode:      strings.ToLower(m.cfg.Worktrees.Mode),
 		NewlySelected:     newly,
-		BindingScope:      "chatgpt_conversation",
+		BindingScope:      scope,
 	}
+}
+
+func (m *Manager) ForgetTransportSession(sessionID string) {
+	identity := IdentityFromTransportSession(sessionID)
+	if identity == nil {
+		return
+	}
+	m.transientMu.Lock()
+	delete(m.transientBindings, identity.Key)
+	delete(m.transientChanges, identity.Key)
+	delete(m.transientHistory, identity.Key)
+	m.transientMu.Unlock()
 }
 
 func bindingMatchesReference(binding Binding, reference RepositoryReference) bool {

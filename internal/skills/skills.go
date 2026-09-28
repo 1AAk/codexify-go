@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/benice2me11/codexify-go/internal/config"
 	"gopkg.in/yaml.v3"
@@ -37,11 +38,28 @@ type Catalog struct {
 }
 
 type Reader struct {
-	cfg config.SkillsConfig
+	cfg   config.SkillsConfig
+	mu    sync.RWMutex
+	extra []root
 }
 
 func New(cfg config.SkillsConfig) *Reader {
 	return &Reader{cfg: cfg}
+}
+
+func (r *Reader) AddRoot(path, scope string) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." || path == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.extra {
+		if strings.EqualFold(existing.path, path) {
+			return
+		}
+	}
+	r.extra = append(r.extra, root{path: path, scope: scope})
 }
 
 func (r *Reader) List(workDir string) (Catalog, error) {
@@ -238,6 +256,12 @@ func (r *Reader) roots(workDir string) []root {
 			add(filepath.Join(home, ".agents", "skills"), "user")
 			add(filepath.Join(home, ".codex", "skills"), "user")
 		}
+	}
+	r.mu.RLock()
+	extra := append([]root(nil), r.extra...)
+	r.mu.RUnlock()
+	for _, item := range extra {
+		add(item.path, item.scope)
 	}
 	return roots
 }

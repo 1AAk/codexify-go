@@ -30,6 +30,23 @@
     "includeUser": true,
     "dirs": []
   },
+  "projectDoc": {
+    "maxBytes": 32768,
+    "fallbackFilenames": [],
+    "rootMarkers": [".git"]
+  },
+  "diff": {
+    "maxPatchBytes": 4194304
+  },
+  "artifactIngress": {
+    "enabled": true,
+    "maxFileBytes": 104857600,
+    "requestTimeout": "2m",
+    "idleTimeout": "30s",
+    "maxRedirects": 3,
+    "maxConcurrentDownloads": 2,
+    "allowedHosts": ["*"]
+  },
   "artifactEgress": {
     "enabled": true,
     "maxFileBytes": 104857600,

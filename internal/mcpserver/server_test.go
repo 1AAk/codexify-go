@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/benice2me11/codexify-go/internal/artifacts"
 	"github.com/benice2me11/codexify-go/internal/config"
@@ -66,9 +69,15 @@ func TestMCPInitializeListAndFileTools(t *testing.T) {
 	if initResp.Code != http.StatusOK {
 		t.Fatalf("initialize status=%d body=%s", initResp.Code, initResp.Body.String())
 	}
+	sessionID := initResp.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("stateful initialize did not return Mcp-Session-Id")
+	}
+	initializedBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
+	_ = postJSON(t, r.Handler(), initializedBody, sessionID)
 
 	listBody := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
-	listResp := postJSON(t, r.Handler(), listBody)
+	listResp := postJSON(t, r.Handler(), listBody, sessionID)
 	if listResp.Code != http.StatusOK {
 		t.Fatalf("tools/list status=%d body=%s", listResp.Code, listResp.Body.String())
 	}
@@ -93,7 +102,7 @@ func TestMCPInitializeListAndFileTools(t *testing.T) {
 	}
 
 	writeBody := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"hello.txt","content":"hello\n"}}}`
-	writeResp := postJSON(t, r.Handler(), writeBody)
+	writeResp := postJSON(t, r.Handler(), writeBody, sessionID)
 	if writeResp.Code != http.StatusOK {
 		t.Fatalf("write_file status=%d body=%s", writeResp.Code, writeResp.Body.String())
 	}
@@ -106,7 +115,7 @@ func TestMCPInitializeListAndFileTools(t *testing.T) {
 	}
 
 	readBody := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"hello.txt"}}}`
-	readResp := postJSON(t, r.Handler(), readBody)
+	readResp := postJSON(t, r.Handler(), readBody, sessionID)
 	if readResp.Code != http.StatusOK {
 		t.Fatalf("read_file status=%d body=%s", readResp.Code, readResp.Body.String())
 	}
@@ -157,6 +166,102 @@ func TestOfficialClientNegotiatesCurrentProtocol(t *testing.T) {
 	}
 	if string(data) != "sdk works\n" {
 		t.Fatalf("written data=%q", data)
+	}
+}
+
+func TestLegacyTransportSessionBindingIsTransient(t *testing.T) {
+	accessRoot := t.TempDir()
+	projectRoot := filepath.Join(accessRoot, "project-a")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "go.mod"), []byte("module example/project-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "hello.txt"), []byte("transport bound\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.MCP.WorkspaceRoot = accessRoot
+	cfg.MCP.MultiProject = true
+	cfg.MCP.BindingsDir = filepath.Join(accessRoot, ".state", "bindings")
+	cfg.MCP.Worktrees = config.WorktreeConfig{Mode: "never", Root: filepath.Join(accessRoot, ".state", "worktrees")}
+	cfg.MCP.AuthEnabled = false
+	cfg.Tunnel.MCPServerURL = "http://127.0.0.1:0/mcp"
+	cfg.Tunnel.Executable = filepath.Join(t.TempDir(), "unused.exe")
+	cfg.Tunnel.TunnelID = "tunnel_test"
+	cfg.Tunnel.APIKeyRef = "env:TEST"
+	r, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.listener.Close()
+		r.exec.Close()
+		if r.bridge != nil {
+			r.bridge.Close()
+		}
+	})
+
+	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"legacy-test","version":"1"}}}`
+	initResp := postJSON(t, r.Handler(), initialize)
+	if initResp.Code != http.StatusOK {
+		t.Fatalf("initialize: %d %s", initResp.Code, initResp.Body.String())
+	}
+	sessionID := initResp.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("missing stateful session id")
+	}
+	_ = postJSON(t, r.Handler(), `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, sessionID)
+
+	selected := postJSON(t, r.Handler(), `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_project_root","arguments":{"path":"project-a"}}}`, sessionID)
+	if selected.Code != http.StatusOK || !strings.Contains(selected.Body.String(), `"bindingScope":"transport_session"`) {
+		t.Fatalf("transport selection failed: %d %s", selected.Code, selected.Body.String())
+	}
+	read := postJSON(t, r.Handler(), `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"hello.txt"}}}`, sessionID)
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), "transport bound") {
+		t.Fatalf("transport-bound read failed: %d %s", read.Code, read.Body.String())
+	}
+	if entries, err := os.ReadDir(cfg.MCP.BindingsDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				t.Fatalf("transient binding persisted to disk: %s", entry.Name())
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "http://127.0.0.1/mcp", nil)
+	deleteReq.Header.Set("Mcp-Session-Id", sessionID)
+	deleteReq.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+	deleteRec := httptest.NewRecorder()
+	r.Handler().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code < 200 || deleteRec.Code >= 300 {
+		t.Fatalf("session delete failed: %d %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := r.sessions.Load(sessionID); !ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := r.sessions.Load(sessionID); ok {
+		t.Fatal("transport session cleanup watcher did not finish")
+	}
+
+	secondInit := postJSON(t, r.Handler(), initialize)
+	secondID := secondInit.Header().Get("Mcp-Session-Id")
+	if secondID == "" || secondID == sessionID {
+		t.Fatalf("invalid second session id %q", secondID)
+	}
+	_ = postJSON(t, r.Handler(), `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, secondID)
+	unbound := postJSON(t, r.Handler(), `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"hello.txt"}}}`, secondID)
+	if unbound.Code != http.StatusOK || !strings.Contains(unbound.Body.String(), "no project selected") {
+		t.Fatalf("new transport session inherited old binding: %d %s", unbound.Code, unbound.Body.String())
 	}
 }
 
@@ -281,8 +386,8 @@ func TestUIResourcesAndToolMetadata(t *testing.T) {
 	if got := metaByName["list_projects"]["ui/resourceUri"]; got != ui.SetupURI {
 		t.Fatalf("list_projects UI resource = %#v", got)
 	}
-	if got := metaByName["git_diff"]["ui/resourceUri"]; got != ui.DiffURI {
-		t.Fatalf("git_diff UI resource = %#v", got)
+	if got := metaByName["show_diff"]["ui/resourceUri"]; got != ui.DiffURI {
+		t.Fatalf("show_diff UI resource = %#v", got)
 	}
 
 	setup, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: ui.SetupURI})
@@ -298,6 +403,98 @@ func TestUIResourcesAndToolMetadata(t *testing.T) {
 	}
 	if len(diff.Contents) != 1 || !strings.Contains(diff.Contents[0].Text, "toolOutput") {
 		t.Fatalf("unexpected diff UI resource: %+v", diff.Contents)
+	}
+}
+
+func TestShowDiffCheckpointsOverMCP(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	runTestGit(t, workspaceRoot, "init")
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "tracked.txt"), []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, workspaceRoot, "add", "tracked.txt")
+	runTestGit(t, workspaceRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init")
+
+	cfg := config.Default()
+	cfg.MCP.WorkspaceRoot = workspaceRoot
+	cfg.MCP.AuthEnabled = false
+	cfg.Tunnel.MCPServerURL = "http://127.0.0.1:0/mcp"
+	cfg.Tunnel.Executable = filepath.Join(t.TempDir(), "unused.exe")
+	cfg.Tunnel.TunnelID = "tunnel_test"
+	cfg.Tunnel.APIKeyRef = "env:TEST"
+	cfg.ArtifactEgress.Dir = filepath.Join(t.TempDir(), "artifacts")
+	r, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.listener.Close()
+		r.exec.Close()
+		if r.bridge != nil {
+			r.bridge.Close()
+		}
+	})
+	httpServer := httptest.NewServer(r.Handler())
+	defer httpServer.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "diff-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL + "/mcp",
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	write, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "write_file",
+		Arguments: map[string]any{
+			"path":    "tracked.txt",
+			"content": "changed\n",
+		},
+	})
+	if err != nil || write.IsError {
+		t.Fatalf("write_file failed: err=%v result=%+v", err, write)
+	}
+
+	shown, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "show_diff",
+		Arguments: map[string]any{
+			"since":   "project_open",
+			"advance": true,
+		},
+	})
+	if err != nil || shown.IsError {
+		t.Fatalf("show_diff failed: err=%v result=%+v", err, shown)
+	}
+	structured, ok := shown.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("show_diff structured type=%T", shown.StructuredContent)
+	}
+	if strings.Contains(fmt.Sprint(structured), "diff --git") {
+		t.Fatalf("model-visible structured output leaked patch: %#v", structured)
+	}
+	if advanced, _ := structured["checkpointAdvanced"].(bool); !advanced {
+		t.Fatalf("checkpoint did not advance: %#v", structured)
+	}
+	metaPayload, ok := shown.Meta["io.github.devnoname120/codexify/diff"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing diff metadata: %#v", shown.Meta)
+	}
+	if patchText, _ := metaPayload["patch"].(string); !strings.Contains(patchText, "tracked.txt") {
+		t.Fatalf("diff metadata missing patch: %#v", metaPayload)
+	}
+
+	incremental, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "show_diff",
+		Arguments: map[string]any{"since": "last_diff", "advance": false},
+	})
+	if err != nil || incremental.IsError {
+		t.Fatalf("incremental show_diff failed: err=%v result=%+v", err, incremental)
+	}
+	if !strings.Contains(fmt.Sprint(incremental.StructuredContent), "No changes since last diff") {
+		t.Fatalf("expected empty incremental diff: %#v", incremental.StructuredContent)
 	}
 }
 
@@ -403,13 +600,24 @@ func TestArtifactMemoryAndSkillsOverMCP(t *testing.T) {
 	}
 }
 
-func postJSON(t *testing.T, handler http.Handler, body string) *httptest.ResponseRecorder {
+func postJSON(t *testing.T, handler http.Handler, body string, sessionID ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+	if len(sessionID) > 0 && sessionID[0] != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID[0])
+	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
+}
+
+func runTestGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
 }

@@ -22,7 +22,7 @@ func (m *Manager) SelectScratch(meta map[string]any) (WorkspaceInfo, error) {
 	}
 	identity := IdentityFromMeta(meta)
 	if identity == nil {
-		return WorkspaceInfo{}, errors.New("scratch workspace selection requires _meta[openai/session]")
+		return WorkspaceInfo{}, errors.New("scratch workspace selection requires a ChatGPT conversation identity or stateful MCP transport session")
 	}
 
 	m.mu.Lock()
@@ -58,11 +58,12 @@ func (m *Manager) SelectScratch(meta map[string]any) (WorkspaceInfo, error) {
 	binding := Binding{
 		Version:      bindingVersion,
 		IdentityHash: identity.Key,
+		Scope:        identity.Scope,
 		Mode:         "scratch",
 		ProjectRoot:  root,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if err := m.writeBinding(binding); err != nil {
+	if err := m.writeBinding(identity, binding); err != nil {
 		return WorkspaceInfo{}, err
 	}
 	m.finishSwitch(identity)
@@ -75,7 +76,7 @@ func (m *Manager) Switch(meta map[string]any, expectedPath string) (WorkspaceCha
 	}
 	identity := IdentityFromMeta(meta)
 	if identity == nil {
-		return WorkspaceChange{}, errors.New("workspace switching requires _meta[openai/session]")
+		return WorkspaceChange{}, errors.New("workspace switching requires a ChatGPT conversation identity or stateful MCP transport session")
 	}
 
 	m.mu.Lock()
@@ -103,10 +104,16 @@ func (m *Manager) Switch(meta map[string]any, expectedPath string) (WorkspaceCha
 	}
 
 	revision := fmt.Sprintf("%d-%s", time.Now().UTC().UnixMicro(), randomSuffix())
-	archiveDir := filepath.Join(m.cfg.BindingsDir, "previous")
-	archivePath := filepath.Join(archiveDir, revision+"-"+identity.Key+".json")
-	if err := writeBindingFile(archivePath, *current); err != nil {
-		return WorkspaceChange{}, err
+	if identity.Persistent {
+		archiveDir := filepath.Join(m.cfg.BindingsDir, "previous")
+		archivePath := filepath.Join(archiveDir, revision+"-"+identity.Key+".json")
+		if err := writeBindingFile(archivePath, *current); err != nil {
+			return WorkspaceChange{}, err
+		}
+	} else {
+		m.transientMu.Lock()
+		m.transientHistory[identity.Key] = append(m.transientHistory[identity.Key], *current)
+		m.transientMu.Unlock()
 	}
 
 	newChange := WorkspaceChange{
@@ -117,8 +124,14 @@ func (m *Manager) Switch(meta map[string]any, expectedPath string) (WorkspaceCha
 	if err := m.writeSwitch(identity, newChange); err != nil {
 		return WorkspaceChange{}, err
 	}
-	if err := os.Remove(m.bindingPath(identity)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return WorkspaceChange{}, err
+	if identity.Persistent {
+		if err := os.Remove(m.bindingPath(identity)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return WorkspaceChange{}, err
+		}
+	} else {
+		m.transientMu.Lock()
+		delete(m.transientBindings, identity.Key)
+		m.transientMu.Unlock()
 	}
 	return newChange, nil
 }
@@ -129,7 +142,7 @@ func (m *Manager) Resume(meta map[string]any, resumePath string) (WorkspaceInfo,
 	}
 	identity := IdentityFromMeta(meta)
 	if identity == nil {
-		return WorkspaceInfo{}, errors.New("workspace resumption requires _meta[openai/session]")
+		return WorkspaceInfo{}, errors.New("workspace resumption requires a ChatGPT conversation identity or stateful MCP transport session")
 	}
 	if !filepath.IsAbs(resumePath) {
 		return WorkspaceInfo{}, errors.New("resumePath must be an absolute active workspace path")
@@ -160,7 +173,13 @@ func (m *Manager) Resume(meta map[string]any, resumePath string) (WorkspaceInfo,
 		return infoFromBinding(m, *existing, false), nil
 	}
 
-	saved, err := m.findSavedBindingByRoot(requested)
+	var saved *Binding
+	if !identity.Persistent {
+		saved = m.findTransientHistoryByRoot(identity, requested)
+	}
+	if saved == nil {
+		saved, err = m.findSavedBindingByRoot(requested)
+	}
 	if err != nil {
 		return WorkspaceInfo{}, err
 	}
@@ -169,12 +188,33 @@ func (m *Manager) Resume(meta map[string]any, resumePath string) (WorkspaceInfo,
 	}
 	saved.Version = bindingVersion
 	saved.IdentityHash = identity.Key
+	saved.Scope = identity.Scope
 	saved.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	if err := m.writeBinding(*saved); err != nil {
+	if err := m.writeBinding(identity, *saved); err != nil {
 		return WorkspaceInfo{}, err
 	}
 	m.finishSwitch(identity)
 	return infoFromBinding(m, *saved, true), nil
+}
+
+func (m *Manager) findTransientHistoryByRoot(identity *Identity, root string) *Binding {
+	if identity == nil {
+		return nil
+	}
+	m.transientMu.RLock()
+	history := append([]Binding(nil), m.transientHistory[identity.Key]...)
+	m.transientMu.RUnlock()
+	for i := len(history) - 1; i >= 0; i-- {
+		binding := history[i]
+		if cleanComparable(binding.ProjectRoot) != cleanComparable(root) {
+			continue
+		}
+		if _, err := os.Stat(binding.ProjectRoot); err != nil {
+			continue
+		}
+		return &binding
+	}
+	return nil
 }
 
 func (m *Manager) findSavedBindingByRoot(root string) (*Binding, error) {
@@ -220,6 +260,16 @@ func (m *Manager) switchPath(identity *Identity) string {
 }
 
 func (m *Manager) readSwitch(identity *Identity) (*WorkspaceChange, error) {
+	if identity != nil && !identity.Persistent {
+		m.transientMu.RLock()
+		change, ok := m.transientChanges[identity.Key]
+		m.transientMu.RUnlock()
+		if !ok {
+			return nil, nil
+		}
+		copyChange := change
+		return &copyChange, nil
+	}
 	data, err := os.ReadFile(m.switchPath(identity))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -238,6 +288,12 @@ func (m *Manager) readSwitch(identity *Identity) (*WorkspaceChange, error) {
 }
 
 func (m *Manager) writeSwitch(identity *Identity, change WorkspaceChange) error {
+	if identity != nil && !identity.Persistent {
+		m.transientMu.Lock()
+		m.transientChanges[identity.Key] = change
+		m.transientMu.Unlock()
+		return nil
+	}
 	data, err := json.MarshalIndent(change, "", "  ")
 	if err != nil {
 		return err
@@ -258,5 +314,11 @@ func (m *Manager) writeSwitch(identity *Identity, change WorkspaceChange) error 
 }
 
 func (m *Manager) finishSwitch(identity *Identity) {
+	if identity != nil && !identity.Persistent {
+		m.transientMu.Lock()
+		delete(m.transientChanges, identity.Key)
+		m.transientMu.Unlock()
+		return
+	}
 	_ = os.Remove(m.switchPath(identity))
 }

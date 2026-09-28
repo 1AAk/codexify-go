@@ -6,26 +6,66 @@ import (
 	"strings"
 )
 
-const openAISessionMetaKey = "openai/session"
+const (
+	openAISessionMetaKey    = "openai/session"
+	transportSessionMetaKey = "codexify-go/transport-session"
+)
 
 type Identity struct {
-	Key string
+	Key        string
+	Scope      string
+	Persistent bool
 }
 
 func IdentityFromMeta(meta map[string]any) *Identity {
 	if meta == nil {
 		return nil
 	}
-	raw, ok := meta[openAISessionMetaKey].(string)
-	if !ok {
+	if raw, ok := meta[openAISessionMetaKey].(string); ok {
+		raw = strings.TrimSpace(raw)
+		if raw != "" {
+			return hashedIdentity("codexify-go/openai-session/v1\x00", raw, "chatgpt_conversation", true)
+		}
+	}
+	if raw, ok := meta[transportSessionMetaKey].(string); ok {
+		raw = strings.TrimSpace(raw)
+		if raw != "" {
+			return hashedIdentity("codexify-go/transport-session/v1\x00", raw, "transport_session", false)
+		}
+	}
+	return nil
+}
+
+func IdentityFromTransportSession(sessionID string) *Identity {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
 		return nil
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
+	return hashedIdentity("codexify-go/transport-session/v1\x00", sessionID, "transport_session", false)
+}
+
+func WithTransportSession(meta map[string]any, sessionID string) map[string]any {
+	if strings.TrimSpace(sessionID) == "" {
+		return meta
 	}
-	sum := sha256.Sum256([]byte("codexify-go/openai-session/v1\x00" + raw))
-	return &Identity{Key: hex.EncodeToString(sum[:])}
+	out := make(map[string]any, len(meta)+1)
+	for key, value := range meta {
+		out[key] = value
+	}
+	if raw, ok := out[openAISessionMetaKey].(string); ok && strings.TrimSpace(raw) != "" {
+		return out
+	}
+	out[transportSessionMetaKey] = sessionID
+	return out
+}
+
+func hashedIdentity(prefix, raw, scope string, persistent bool) *Identity {
+	sum := sha256.Sum256([]byte(prefix + raw))
+	return &Identity{
+		Key:        hex.EncodeToString(sum[:]),
+		Scope:      scope,
+		Persistent: persistent,
+	}
 }
 
 func (i *Identity) Short() string {

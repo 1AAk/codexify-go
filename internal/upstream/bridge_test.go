@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +17,86 @@ import (
 
 type echoInput struct {
 	Text string `json:"text"`
+}
+
+func TestGatewayModeWritesSkillAndUsesSingleTool(t *testing.T) {
+	upstreamServer := mcp.NewServer(&mcp.Implementation{Name: "gateway-fixture", Version: "1.0.0"}, nil)
+	mcp.AddTool(upstreamServer, &mcp.Tool{Name: "echo", Description: "echo text"},
+		func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
+			return nil, echoOutput{Text: in.Text}, nil
+		})
+	mcp.AddTool(upstreamServer, &mcp.Tool{Name: "second", Description: "second function"},
+		func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
+			return nil, echoOutput{Text: "second:" + in.Text}, nil
+		})
+	upstreamHTTP := httptest.NewServer(mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return upstreamServer },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+	))
+	defer upstreamHTTP.Close()
+
+	downstream := mcp.NewServer(&mcp.Implementation{Name: "downstream", Version: "1"}, nil)
+	generated := t.TempDir()
+	bridge, err := ConnectAndRegister(context.Background(), []config.UpstreamMCPConfig{
+		{Name: "fixture_gateway", URL: upstreamHTTP.URL, Transport: "streamable_http", Mode: "gateway"},
+	}, downstream, slog.New(slog.NewTextHandler(io.Discard, nil)), map[string]struct{}{}, 1<<20, generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close()
+
+	downstreamHTTP := httptest.NewServer(mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return downstream },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+	))
+	defer downstreamHTTP.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             downstreamHTTP.URL,
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gatewayName string
+	for _, tool := range listed.Tools {
+		if strings.Contains(tool.Description, "Gateway to the") {
+			gatewayName = tool.Name
+		}
+	}
+	if gatewayName == "" {
+		t.Fatalf("gateway tool missing: %+v", listed.Tools)
+	}
+	called, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: gatewayName,
+		Arguments: map[string]any{
+			"function":  "echo",
+			"arguments": map[string]any{"text": "gateway works"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStructuredText(t, called.StructuredContent, "gateway works")
+
+	skillPath := filepath.Join(generated, "fixture_gateway", "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, expected := range []string{"name: fixture_gateway", "## echo", "## second", gatewayName} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("generated skill missing %q:\n%s", expected, text)
+		}
+	}
 }
 
 type echoOutput struct {
@@ -56,7 +138,7 @@ func TestBridgeCatalogAndDirectModes(t *testing.T) {
 	bridge, err := ConnectAndRegister(context.Background(), []config.UpstreamMCPConfig{
 		{Name: "private", URL: upstreamHTTP.URL, Transport: "streamable_http", Mode: "catalog"},
 		{Name: "direct", URL: upstreamHTTP.URL, Transport: "streamable_http", Mode: "direct"},
-	}, downstream, logger, map[string]struct{}{}, 1<<20)
+	}, downstream, logger, map[string]struct{}{}, 1<<20, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +237,7 @@ func TestOptionalUpstreamFailureIsReported(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "downstream", Version: "1"}, nil)
 	bridge, err := ConnectAndRegister(context.Background(), []config.UpstreamMCPConfig{
 		{Name: "offline", URL: "http://127.0.0.1:1/mcp", Transport: "streamable_http", Mode: "catalog", Required: false},
-	}, server, slog.New(slog.NewTextHandler(io.Discard, nil)), map[string]struct{}{}, 1<<20)
+	}, server, slog.New(slog.NewTextHandler(io.Discard, nil)), map[string]struct{}{}, 1<<20, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -31,15 +31,18 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Version        int                  `json:"version"`
-	Log            LogConfig            `json:"log"`
-	Service        ServiceConfig        `json:"service"`
-	MCP            MCPConfig            `json:"mcp"`
-	Memory         MemoryConfig         `json:"memory"`
-	Skills         SkillsConfig         `json:"skills"`
-	ArtifactEgress ArtifactEgressConfig `json:"artifactEgress"`
-	Tunnel         TunnelConfig         `json:"tunnel"`
-	Supervisor     SupervisorConfig     `json:"supervisor"`
+	Version         int                   `json:"version"`
+	Log             LogConfig             `json:"log"`
+	Service         ServiceConfig         `json:"service"`
+	MCP             MCPConfig             `json:"mcp"`
+	Memory          MemoryConfig          `json:"memory"`
+	Skills          SkillsConfig          `json:"skills"`
+	ProjectDoc      ProjectDocConfig      `json:"projectDoc"`
+	Diff            DiffConfig            `json:"diff"`
+	ArtifactIngress ArtifactIngressConfig `json:"artifactIngress"`
+	ArtifactEgress  ArtifactEgressConfig  `json:"artifactEgress"`
+	Tunnel          TunnelConfig          `json:"tunnel"`
+	Supervisor      SupervisorConfig      `json:"supervisor"`
 }
 
 type LogConfig struct {
@@ -104,6 +107,26 @@ type SkillsConfig struct {
 	Dirs        []string `json:"dirs,omitempty"`
 }
 
+type ProjectDocConfig struct {
+	MaxBytes          int      `json:"maxBytes,omitempty"`
+	FallbackFilenames []string `json:"fallbackFilenames,omitempty"`
+	RootMarkers       []string `json:"rootMarkers,omitempty"`
+}
+
+type DiffConfig struct {
+	MaxPatchBytes int `json:"maxPatchBytes"`
+}
+
+type ArtifactIngressConfig struct {
+	Enabled                bool     `json:"enabled"`
+	MaxFileBytes           int64    `json:"maxFileBytes"`
+	RequestTimeout         Duration `json:"requestTimeout"`
+	IdleTimeout            Duration `json:"idleTimeout"`
+	MaxRedirects           int      `json:"maxRedirects"`
+	MaxConcurrentDownloads int      `json:"maxConcurrentDownloads"`
+	AllowedHosts           []string `json:"allowedHosts"`
+}
+
 type ArtifactEgressConfig struct {
 	Enabled              bool     `json:"enabled"`
 	Dir                  string   `json:"dir,omitempty"`
@@ -165,6 +188,22 @@ func Default() Config {
 		Skills: SkillsConfig{
 			Enabled:     true,
 			IncludeUser: true,
+		},
+		ProjectDoc: ProjectDocConfig{
+			MaxBytes:    32 * 1024,
+			RootMarkers: []string{".git"},
+		},
+		Diff: DiffConfig{
+			MaxPatchBytes: 4 * 1024 * 1024,
+		},
+		ArtifactIngress: ArtifactIngressConfig{
+			Enabled:                true,
+			MaxFileBytes:           100 * 1024 * 1024,
+			RequestTimeout:         Duration(2 * time.Minute),
+			IdleTimeout:            Duration(30 * time.Second),
+			MaxRedirects:           3,
+			MaxConcurrentDownloads: 2,
+			AllowedHosts:           []string{"*"},
 		},
 		ArtifactEgress: ArtifactEgressConfig{
 			Enabled:              true,
@@ -313,6 +352,30 @@ func (c Config) Validate() error {
 	if c.Memory.MaxBytes <= 0 {
 		errs = append(errs, errors.New("memory.maxBytes must be > 0"))
 	}
+	if c.ProjectDoc.MaxBytes < 0 {
+		errs = append(errs, errors.New("projectDoc.maxBytes must be >= 0"))
+	}
+	if c.Diff.MaxPatchBytes < 0 {
+		errs = append(errs, errors.New("diff.maxPatchBytes must be >= 0"))
+	}
+	if c.ArtifactIngress.MaxFileBytes <= 0 {
+		errs = append(errs, errors.New("artifactIngress.maxFileBytes must be > 0"))
+	}
+	if c.ArtifactIngress.RequestTimeout.Duration() <= 0 {
+		errs = append(errs, errors.New("artifactIngress.requestTimeout must be > 0"))
+	}
+	if c.ArtifactIngress.IdleTimeout.Duration() <= 0 || c.ArtifactIngress.IdleTimeout.Duration() > c.ArtifactIngress.RequestTimeout.Duration() {
+		errs = append(errs, errors.New("artifactIngress.idleTimeout must be > 0 and <= requestTimeout"))
+	}
+	if c.ArtifactIngress.MaxRedirects < 0 || c.ArtifactIngress.MaxRedirects > 10 {
+		errs = append(errs, errors.New("artifactIngress.maxRedirects must be between 0 and 10"))
+	}
+	if c.ArtifactIngress.MaxConcurrentDownloads < 1 || c.ArtifactIngress.MaxConcurrentDownloads > 16 {
+		errs = append(errs, errors.New("artifactIngress.maxConcurrentDownloads must be between 1 and 16"))
+	}
+	if len(c.ArtifactIngress.AllowedHosts) == 0 {
+		errs = append(errs, errors.New("artifactIngress.allowedHosts must not be empty"))
+	}
 	if c.ArtifactEgress.MaxFileBytes <= 0 {
 		errs = append(errs, errors.New("artifactEgress.maxFileBytes must be > 0"))
 	}
@@ -371,8 +434,8 @@ func (c Config) Validate() error {
 		if mode == "" {
 			mode = "catalog"
 		}
-		if mode != "catalog" && mode != "direct" {
-			errs = append(errs, fmt.Errorf("MCP upstream %q mode must be catalog or direct", name))
+		if mode != "catalog" && mode != "direct" && mode != "gateway" {
+			errs = append(errs, fmt.Errorf("MCP upstream %q mode must be catalog, direct, or gateway", name))
 		}
 	}
 	if strings.TrimSpace(c.Tunnel.Executable) == "" {
