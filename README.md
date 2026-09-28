@@ -151,9 +151,9 @@ restarts and are immutable for that ChatGPT conversation. The raw
 
 When `worktrees.mode` is `auto`, the first conversation uses the source checkout
 and a later conversation selecting the same Git project gets an isolated managed
-worktree. `always` always isolates Git projects; `never` always uses the source
-checkout unless an explicit worktree request is made, in which case selection
-fails rather than silently ignoring the request.
+worktree. `always` isolates Git projects and `never` uses the source checkout.
+An explicit `createWorktree=true/false` on `set_project_root` overrides the
+configured mode for that selection.
 
 ### Upstream MCP aggregation
 
