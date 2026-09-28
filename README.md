@@ -122,8 +122,8 @@ Not implemented yet:
 - pixel-level parity with the much larger upstream Rust ChatGPT widgets; the Go
   implementation intentionally uses compact self-contained MCP Apps over the
   same server contracts;
-- macOS/Linux runtime/service validation (release cross-builds exist, but those
-  platforms are the next dedicated production-parity stage).
+- Linux runtime/service validation. Windows and macOS Apple Silicon are now
+  production-validated; Linux remains the next dedicated platform-parity stage.
 
 The MCP core has been exercised with both raw MCP requests and the official Go
 MCP client. End-to-end Windows SCM smoke tests verify the user-context lifecycle
@@ -323,7 +323,7 @@ workspace state. `show_diff` carries the diff-app/result metadata and remains
 usable as a normal MCP tool in clients that ignore MCP Apps metadata.
 
 `setup_status` also exposes a connector schema marker such as
-`0.7.1-dev+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
+`0.8.0-dev+markdown-chat-v5+tickets-v1+workspace-v1+artifact-ingress-v1+gateway-v1`. A conversation can
 echo the marker it currently holds; the server records the first observed
 conversation marker privately and reports `conversationStale` when the active
 server schema has changed.
@@ -413,7 +413,31 @@ checksums.txt
 ```
 
 The release contract is regression-tested against the self-updater. Successful
-cross-compilation is not treated as runtime validation for macOS/Linux.
+cross-compilation is not treated as runtime validation for Linux. macOS ARM64 is
+also exercised on a real Apple Silicon host.
+
+### macOS Apple Silicon service model
+
+macOS uses a per-user LaunchAgent under `~/Library/LaunchAgents`, not a root
+LaunchDaemon. The agent is installed with `RunAtLoad` plus restart-on-failure
+`KeepAlive` semantics and managed through `launchctl bootstrap/bootout` in the
+current `gui/<uid>` domain.
+
+Because launchd already runs the service in the logged-in user's Aqua session,
+macOS does not need the Windows `CreateProcessAsUser` worker split. The MCP
+server, Git commands, Keychain/SSH context, plugin discovery, and tunnel
+supervisor all execute directly as that user.
+
+POSIX child processes are placed in their own process groups. Graceful/forced
+supervisor shutdown and exec-session cancellation signal the full process group,
+so grandchildren do not survive service stop. The same behavior is shared with
+the future Linux service backend.
+
+On the Apple Silicon validation host the real LaunchAgent lifecycle passed
+install/start/status, MCP health, forced tunnel-child death/restart, and clean
+stop/remove without orphan processes. The managed OpenAI
+`tunnel-client-runtime v0.0.12` was also downloaded, SHA-verified, compatibility
+probed, and confirmed as a native Mach-O arm64 executable.
 
 Validate configuration without starting the tunnel:
 

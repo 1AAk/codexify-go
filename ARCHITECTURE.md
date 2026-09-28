@@ -365,8 +365,35 @@ GitHub Actions tests native Windows/Linux/macOS runners and cross-builds the
 release target set with `CGO_ENABLED=0`. Stable tag releases package exact
 OS/architecture zip names and aggregate their SHA-256 values into
 `checksums.txt`, matching the self-update client's asset contract. The workflow
-is publishing infrastructure, not evidence of macOS/Linux runtime/service
-parity; those platforms require their own live lifecycle validation.
+is publishing infrastructure, not by itself evidence of Linux runtime/service
+parity. macOS ARM64 additionally has live lifecycle validation on Apple Silicon.
+
+## macOS LaunchAgent lifecycle
+
+Darwin installs a per-user LaunchAgent in `~/Library/LaunchAgents` and manages it
+inside the caller's `gui/<uid>` launchd domain. The plist uses canonical plist
+boolean syntax, `RunAtLoad`, failure-oriented `KeepAlive`, bounded launchd
+throttling, and dedicated stdout/stderr paths next to the structured service
+log. Fresh bootstrap starts the job directly; an already loaded job is restarted
+with `kickstart -k`.
+
+The macOS service runs in the interactive user's context, so there is no second
+user-worker process. This preserves Keychain, SSH agent, Git credential helper,
+PATH/plugin state, and the user's filesystem permissions without requiring root.
+Darwin self-update therefore performs the verified replacement synchronously and
+the CLI explicitly restarts the LaunchAgent when it had been running before the
+update.
+
+POSIX supervisor and exec-session children are created in dedicated process
+groups (`Setpgid`) and shutdown signals target the group rather than only the
+direct child. This closes the orphan-grandchild gap that existed in the original
+non-Windows implementation.
+
+Path handling is canonicalized through symlink resolution before security or
+Git-root comparisons. This is required on macOS where system aliases such as
+`/var` and `/private/var` denote the same filesystem location. Canonicalization
+is shared by workspace confinement, project/worktree comparison, diff scope, and
+Markdown-chat state without weakening explicit user-symlink escape checks.
 
 ## Windows process and identity model
 
@@ -410,7 +437,7 @@ account name or profile path.
 ### Remaining Codexify compatibility
 
 - pixel-level parity with upstream Rust's substantially larger ChatGPT widgets;
-- macOS Apple Silicon and Linux production runtime/service validation.
+- Linux production runtime/service validation.
 
 ## Upstream reference
 
