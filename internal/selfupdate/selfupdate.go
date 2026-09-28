@@ -312,7 +312,8 @@ func checksumFor(data []byte, filename string) (string, error) {
 		}
 		hash := strings.ToLower(strings.TrimSpace(fields[0]))
 		name := strings.TrimPrefix(strings.TrimSpace(fields[len(fields)-1]), "*")
-		if name == filename && len(hash) == 64 && isHex(hash) {
+		normalizedName := strings.ReplaceAll(name, "\\", "/")
+		if (normalizedName == filename || strings.HasSuffix(normalizedName, "/"+filename)) && len(hash) == 64 && isHex(hash) {
 			return hash, nil
 		}
 	}

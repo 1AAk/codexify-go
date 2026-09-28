@@ -20,6 +20,9 @@ func TestReleaseWorkflowMatchesUpdaterAssetContract(t *testing.T) {
 	for _, want := range []string{
 		"codexify-go-v${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip",
 		"checksums.txt",
+		`(cd dist && sha256sum "$archive" > "$archive.sha256")`,
+		"softprops/action-gh-release@v3",
+		"overwrite_files: true",
 		"goos: windows",
 		"goos: linux",
 		"goos: darwin",
@@ -29,6 +32,9 @@ func TestReleaseWorkflowMatchesUpdaterAssetContract(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("release workflow missing %q", want)
 		}
+	}
+	if strings.Contains(text, `sha256sum "dist/$archive"`) {
+		t.Fatal("release workflow must not embed the staging directory in checksums.txt")
 	}
 }
 
@@ -55,6 +61,18 @@ func TestChecksumFor(t *testing.T) {
 	}
 	if _, err := checksumFor(data, "missing.zip"); err == nil {
 		t.Fatal("expected missing checksum to fail")
+	}
+}
+
+func TestChecksumForAcceptsStagingDirectoryPrefix(t *testing.T) {
+	hash := strings.Repeat("c", 64)
+	data := []byte(hash + "  dist/artifact.zip\n")
+	got, err := checksumFor(data, "artifact.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != hash {
+		t.Fatalf("hash=%q", got)
 	}
 }
 
