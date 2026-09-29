@@ -40,7 +40,7 @@ The real connector is currently served by Codexify Go. The Rust user service is 
 | 13 - Plugin skills | PASS | Go discovered the installed plugin registry and successfully read a real plugin skill. With the gateway enabled it also generated and discovered the `cutover_gateway` skill. |
 | 14 - Upstream MCP | PASS (Linux) | A separately supervised standalone Streamable HTTP MCP server was independently probed, then connected as a required Go gateway. A direct authenticated MCP client to the Codexify Go endpoint listed `cutover_gateway` among 29 tools and successfully called its `echo` function. Go also generated/discovered the gateway skill. A new ChatGPT conversation after connector Refresh exposed `cutover_gateway` in the model-visible tool surface and successfully called `echo`, confirming end-to-end upstream MCP operation through Codexify Go on Linux. Windows and macOS remain separately unverified. |
 | 15 - Attachments | PASS | Real egress succeeded through `export_host_file`; the resulting native OpenAI file was then imported back through `import_host_file`. The imported 36-byte file retained the same SHA-256 and content. |
-| 16 - Rust dependency elimination | PARTIAL / CLEAN BOOT PASS | Rust is now `inactive/disabled`. A clean Linux reboot automatically started only the enabled Go cutover service, which restored this conversation and exact managed worktree without manual startup. The Go service owns its own binary, config, credential copy, and managed tunnel runtime; Rust files remain only for rollback. A short representative Rust-free soak remains before declaring Linux replacement complete. |
+| 16 - Rust dependency elimination | PASS (Linux) | Rust is `inactive/disabled`. A clean Linux reboot automatically started only the enabled Go cutover service, which restored this conversation and exact managed worktree without manual startup. Post-reboot multi-conversation soak kept independent conversation bindings isolated, Git/SSH and normal MCP operations remained healthy, and the Go service stayed stable without restarts. The Go service owns its own binary, config, credential copy, and managed tunnel runtime; Rust files remain only for rollback. |
 
 ## Live process evidence
 
@@ -132,6 +132,16 @@ This resolution is **Linux-specific evidence**. The equivalent upstream MCP gate
 The original Go-managed tunnel PID observed after cutover was `55035`. It was terminated unexpectedly during the live connector session. The active tool call lost transport and timed out, then the Go supervisor started a replacement tunnel process (PID `55619` in this run). A subsequent MCP command succeeded through the same ChatGPT connector while the Rust service remained inactive.
 
 This satisfies the core Phase 9 recovery behavior. PID values are evidence for this run only.
+
+## Future UX follow-up
+
+### Scratch-contained repositories across conversations
+
+Post-reboot multi-conversation soak confirmed that separate scratch bindings remain isolated and persistent. One conversation owned scratch root `/home/whtvr/.codexify-go/scratch/af4903e8079a`, containing the Git repository `mafia-party`, while another conversation was independently bound to `/home/whtvr/.codexify-go/scratch/bfd82b1af946`.
+
+The repository was intact, but discovering or resuming a Git repository nested inside another conversation's scratch root from a different/new conversation is awkward: it is not naturally surfaced as an ordinary selectable project, and the user-facing recovery guidance can misleadingly suggest simply selecting the nested repository in a new context. Consider a future project-discovery/resume UX that can safely surface nested Git repositories from preserved scratch workspaces, or provide an explicit cross-conversation "resume existing workspace/repository" flow without weakening conversation binding isolation.
+
+This is a usability follow-up, not a Linux Rust -> Go replacement blocker; the underlying scratch data and independent persistent bindings were preserved correctly.
 
 ## Rollback
 
