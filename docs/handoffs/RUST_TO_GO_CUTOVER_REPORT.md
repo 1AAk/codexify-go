@@ -29,7 +29,7 @@ The real connector is currently served by Codexify Go. The Rust user service is 
 | 4 - Conversation persistence | PARTIAL / DEFECT | The current conversation survived transport replacement, but the Rust project binding was not imported into Go and had to be selected again once. |
 | 5 - Multi-project | PENDING | |
 | 6 - Worktree lifecycle | PARTIAL | The Rust side had this conversation in a managed worktree. After Go cutover and rebinding, Go selected the source project rather than restoring the Rust worktree. Full Go create/switch/resume test remains. |
-| 7 - Real Git delivery | IN PROGRESS | This report and handoff update are being made through the Go connector. Commit/push remains. |
+| 7 - Real Git delivery | PASS | This report and handoff update were committed and pushed to the user's fork through Go-only `exec_command` using the installed service's Git/SSH context. The final rebased delivery commit is `4602610`. |
 | 8 - Long exec/stdin | FAIL / DEFECT | Long-running exec started correctly, but Go returned a string session id while the currently loaded ChatGPT `write_stdin` schema requires an integer. The session therefore cannot receive stdin until schema refresh/reconnect is resolved. |
 | 9 - Tunnel recovery | PASS | The Go-managed tunnel process was killed unexpectedly. The in-flight tool call disconnected/timed out as expected; the supervisor created a new tunnel process and the same connector resumed serving calls without Rust or manual repair. |
 | 10 - Service recovery | PENDING | |
@@ -103,13 +103,12 @@ Do not commit the snapshot, tunnel credential, connector token, or machine-speci
 
 ## Next gates
 
-1. Commit and push this first real Go-authored repository change.
-2. Exercise long-running exec/stdin/cancellation through Go.
-3. Test Go tunnel crash recovery and service crash recovery.
-4. Test native Go binding persistence across Go service restart.
-5. Explicitly reconnect/refresh the connector and re-evaluate tool-schema parity.
-6. Exercise multi-project and managed worktree create/switch/resume.
-7. Exercise real plugin skills, upstream MCP, and attachment ingress/egress.
-8. Exercise self-update.
-9. Reboot with Rust still inactive and verify automatic Go recovery.
-10. Continue several normal sessions with Rust unavailable before declaring v1.0 replacement.
+1. Refresh/reconnect the connector and rerun long-running exec/stdin/cancellation with the Go schema.
+2. Test Go service crash recovery.
+3. Test native Go binding persistence across Go service restart.
+4. Re-evaluate the missing/stale tool-surface differences after connector schema refresh.
+5. Exercise multi-project and managed worktree create/switch/resume.
+6. Exercise real plugin skills, upstream MCP, and attachment ingress/egress.
+7. Exercise self-update.
+8. Reboot with Rust still inactive and verify automatic Go recovery.
+9. Continue several normal sessions with Rust unavailable before declaring v1.0 replacement.
