@@ -396,7 +396,9 @@ func renderSystemdUnit(exePath, configPath string, cfg config.Config) (string, e
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", managedUnitHeader(unitName))
 	b.WriteString("[Unit]\n")
-	b.WriteString("Description=Codexify Go\n\n")
+	b.WriteString("Description=Codexify Go\n")
+	b.WriteString("StartLimitIntervalSec=60s\n")
+	b.WriteString("StartLimitBurst=5\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=exec\n")
 	fmt.Fprintf(&b, "ExecStart=:%s\n", strings.Join(quoted, " "))

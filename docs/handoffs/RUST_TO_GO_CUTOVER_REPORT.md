@@ -69,11 +69,13 @@ For this run a separate Go config was created instead of mutating the Rust confi
 
 ### CUTOVER-002 - Existing conversation/project binding is not migrated Rust -> Go
 
-**Severity:** P1 candidate until expected migration semantics are decided.
+**Status:** FIXED IN SOURCE / live cutover acceptance pending next install/update.
 
 After Go took over the connector, the existing conversation remained connected but Go returned that no project was selected. Selecting `codexify-go` again restored project access.
 
 This is important for the final acceptance requirement that an existing conversation continues correctly after Rust becomes unavailable.
+
+Go now derives the exact legacy Rust conversation identity from the same `openai/session` metadata using Rust's `codexify/openai-session/v1` namespace when no Go-native binding exists. It reads only the exact matching legacy Rust v2 binding, validates the access root and referenced paths, persists a new Go-native binding under the Go identity, and leaves the Rust record unchanged. Existing Go bindings always take precedence; unsafe, stale, mismatched, or ambiguous legacy records are ignored rather than guessed. Focused tests cover successful import, unchanged Rust state, unsafe-root rejection, and Go-binding precedence. Live acceptance requires installing/updating to a build containing this fix and testing a conversation that still has only a Rust binding.
 
 ### CUTOVER-003 - Hot cutover exposes connector tool-schema drift
 
@@ -93,7 +95,7 @@ After the user refreshed the connector tools, the Go schema loaded correctly and
 
 ### CUTOVER-004 - Required upstream failure can cause an unbounded service restart loop
 
-**Severity:** P2 operational robustness issue; evaluate before v1.0.
+**Status:** FIXED IN SOURCE / live installed-service acceptance pending next install/update.
 
 Two deliberately required upstream configurations were unavailable during startup. Go correctly failed startup because the upstream was marked required, but `Restart=on-failure` then retried indefinitely. The observed restart counter exceeded 100 attempts.
 
@@ -104,6 +106,8 @@ The corrected gateway test runs the standalone MCP server under a separate syste
 The first real Linux cold-boot attempt reproduced this defect under realistic startup ordering. The temporary `codexify-cutover-upstream.service` did not survive reboot, while the Go cutover config still marked `cutover_gateway` as required. Codexify Go therefore failed startup on connection refusal to `127.0.0.1:39091` and systemd repeatedly restarted it; `NRestarts` reached 25 during investigation. The test-only upstream was then removed from the cutover boot config, after which the Go service remained active with a stable PID and `NRestarts=0` and project discovery recovered.
 
 The same boot also revealed that the preserved Rust `codexify.service` was still enabled and therefore started automatically after reboot. It was stopped and disabled again; the Go cutover service remains enabled. A second reboot is required for a clean Go-only cold-boot acceptance run.
+
+The Linux service unit renderer was subsequently hardened without weakening `required` upstream semantics. Managed units now set `StartLimitIntervalSec=60s` and `StartLimitBurst=5` while retaining `Restart=on-failure` and `RestartSec=5s`. An unavailable required upstream therefore still makes startup fail, but systemd rate-limits repeated failures instead of restarting indefinitely. The regression test was observed failing before the change, then the focused service tests, full `go test ./...`, and `go build ./cmd/codexify-go` passed. The currently installed cutover binary/unit predates this source fix; live service acceptance belongs to the next install/self-update cycle.
 
 ### CUTOVER-005 - Existing conversation retained a stale gateway tool snapshot
 

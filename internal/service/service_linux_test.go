@@ -77,6 +77,8 @@ func TestRenderSystemdUnitUsesUserServiceContractAndEscapesPaths(t *testing.T) {
 	}
 
 	required := []string{
+		"StartLimitIntervalSec=60s",
+		"StartLimitBurst=5",
 		"[Service]",
 		"Type=exec",
 		"Restart=on-failure",
