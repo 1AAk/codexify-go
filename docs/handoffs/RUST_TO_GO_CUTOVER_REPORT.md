@@ -30,14 +30,14 @@ The real connector is currently served by Codexify Go. The Rust user service is 
 | 5 - Multi-project | PENDING | |
 | 6 - Worktree lifecycle | PARTIAL | The Rust side had this conversation in a managed worktree. After Go cutover and rebinding, Go selected the source project rather than restoring the Rust worktree. Full Go create/switch/resume test remains. |
 | 7 - Real Git delivery | PASS | This report and handoff update were committed and pushed to the user's fork through Go-only `exec_command` using the installed service's Git/SSH context. The final rebased delivery commit is `4602610`. |
-| 8 - Long exec/stdin | FAIL / DEFECT | Long-running exec started correctly, but Go returned a string session id while the currently loaded ChatGPT `write_stdin` schema requires an integer. The session therefore cannot receive stdin until schema refresh/reconnect is resolved. |
+| 8 - Long exec/stdin | PASS after schema refresh | After refreshing the connector schema, a long-running command returned a string session id and `write_stdin` accepted that id, delivered `go-only-stdin`, and observed normal completion. |
 | 9 - Tunnel recovery | PASS | The Go-managed tunnel process was killed unexpectedly. The in-flight tool call disconnected/timed out as expected; the supervisor created a new tunnel process and the same connector resumed serving calls without Rust or manual repair. |
-| 10 - Service recovery | PENDING | |
+| 10 - Service recovery | PASS | The Go service was killed with SIGKILL. systemd restarted it with a new PID and incremented `NRestarts`; the tunnel and this conversation recovered while Rust stayed inactive. |
 | 11 - Self-update | PENDING | |
-| 12 - Bindings/state | PARTIAL / DEFECT | Cross-implementation Rust -> Go binding migration is absent in this first cutover. Native Go restart persistence still needs testing. |
-| 13 - Plugin skills | PENDING | |
-| 14 - Upstream MCP | PENDING | |
-| 15 - Attachments | PENDING | |
+| 12 - Bindings/state | PARTIAL | Cross-implementation Rust -> Go binding migration was absent at initial cutover, but after rebinding, the native Go conversation/project binding survived a Go service crash/restart. Reboot persistence remains. |
+| 13 - Plugin skills | PASS | Go discovered the installed plugin registry and successfully read a real plugin skill. With the gateway enabled it also generated and discovered the `cutover_gateway` skill. |
+| 14 - Upstream MCP | PARTIAL | A separately supervised standalone Streamable HTTP MCP server was independently probed, then connected as a required Go gateway. Both services remain active and Go generated the gateway skill. Calling the dynamically added gateway tool still requires a ChatGPT connector Refresh. |
+| 15 - Attachments | PARTIAL | Real egress succeeded through `export_host_file` with a durable artifact reference and SHA-256. Real attachment ingress remains. |
 | 16 - Rust dependency elimination | PARTIAL | Rust service is currently inactive and the active Go service owns its own binary, config, credential copy, and managed tunnel runtime. Rust files remain available only for rollback. Reboot and representative workflow suite remain. |
 
 ## Live process evidence
@@ -85,7 +85,19 @@ The ChatGPT side initially retained tool definitions from the Rust connector. Tw
 
 The Go `apply_patch` schema also differed from the Rust-era invocation shape. This may be resolved by an explicit connector schema refresh/reconnect, so no code change should be made until Phase 3/4 distinguishes stale client schema from a real Go parity gap.
 
-The Phase 8 stdin check makes this a concrete blocker in the current session: Go `exec_command` returned a string session id, while the ChatGPT-loaded `write_stdin` schema validates `session_id` as an integer before the call can reach Go.
+The initial Phase 8 stdin check made this a concrete blocker before connector refresh: Go `exec_command` returned a string session id, while the stale ChatGPT-loaded `write_stdin` schema validated `session_id` as an integer before the call could reach Go.
+
+After the user refreshed the connector tools, the Go schema loaded correctly and the same long-exec/stdin flow passed. This reclassifies the session-id mismatch as stale client schema during in-place implementation replacement rather than a Go exec/stdin runtime defect.
+
+### CUTOVER-004 - Required upstream failure can cause an unbounded service restart loop
+
+**Severity:** P2 operational robustness issue; evaluate before v1.0.
+
+Two deliberately required upstream configurations were unavailable during startup. Go correctly failed startup because the upstream was marked required, but `Restart=on-failure` then retried indefinitely. The observed restart counter exceeded 100 attempts.
+
+The first upstream, ChatGPT's bundled `node_repl`, was not a valid standalone test in the supplied environment. The second initial HTTP attempt also became unavailable because its temporary server was a child of the connector exec session. Neither is evidence that the Go gateway implementation itself is broken.
+
+The corrected gateway test runs the standalone MCP server under a separate systemd user transient service. It was independently probed successfully before Codexify Go was restarted, and Codexify Go then connected to it successfully.
 
 ## Recovery evidence
 
