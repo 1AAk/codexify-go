@@ -29,13 +29,13 @@ The real connector is currently served by Codexify Go. The Rust user service is 
 | 2 - Cold boot | PENDING | Requires a real reboot while Go remains the active implementation. |
 | 3 - ChatGPT reconnect | PARTIAL | Hot transport replacement recovered automatically. Explicit disconnect/reconnect remains. |
 | 4 - Conversation persistence | PARTIAL / DEFECT | The current conversation survived transport replacement, but the Rust project binding was not imported into Go and had to be selected again once. |
-| 5 - Multi-project | PENDING | |
-| 6 - Worktree lifecycle | PARTIAL | The Rust side had this conversation in a managed worktree. After Go cutover and rebinding, Go selected the source project rather than restoring the Rust worktree. Full Go create/switch/resume test remains. |
+| 5 - Multi-project | PARTIAL | Go enumerates the Linux access-root project catalogue correctly (15 selectable projects observed). Destructive switching of this already-bound conversation requires the separate `setup_ui_switch_project` gate, which is not model-visible in this conversation; simultaneous independent conversation bindings remain for final interactive acceptance. |
+| 6 - Worktree lifecycle | PARTIAL | The Rust side had this conversation in a managed worktree. After Go cutover and rebinding, Go selected the source project rather than restoring the Rust worktree. Native Go now lists the source tree plus managed/additional worktrees and successfully resumes this conversation's exact managed worktree via `resumePath`. Independent create/switch/resume across conversations remains for final interactive acceptance. |
 | 7 - Real Git delivery | PASS | This report and handoff update were committed and pushed to the user's fork through Go-only `exec_command` using the installed service's Git/SSH context. The final rebased delivery commit is `4602610`. |
 | 8 - Long exec/stdin | PASS after schema refresh | After refreshing the connector schema, a long-running command returned a string session id and `write_stdin` accepted that id, delivered `go-only-stdin`, and observed normal completion. |
 | 9 - Tunnel recovery | PASS | The Go-managed tunnel process was killed unexpectedly. The in-flight tool call disconnected/timed out as expected; the supervisor created a new tunnel process and the same connector resumed serving calls without Rust or manual repair. |
 | 10 - Service recovery | PASS | The Go service was killed with SIGKILL. systemd restarted it with a new PID and incremented `NRestarts`; the tunnel and this conversation recovered while Rust stayed inactive. |
-| 11 - Self-update | PENDING | |
+| 11 - Self-update | PARTIAL / BLOCKED BY RELEASE STATE | The installed Linux Go binary successfully exercised the live release-check path with `update check --force`: current `0.8.2-dev`, latest published `0.8.1`, status `ahead_of_latest`, source `github_api`. There is no newer release to apply, so a real binary replacement/restart update cannot be truthfully acceptance-tested yet. |
 | 12 - Bindings/state | PARTIAL | Cross-implementation Rust -> Go binding migration was absent at initial cutover, but after rebinding, the native Go conversation/project binding survived a Go service crash/restart. Reboot persistence remains. |
 | 13 - Plugin skills | PASS | Go discovered the installed plugin registry and successfully read a real plugin skill. With the gateway enabled it also generated and discovered the `cutover_gateway` skill. |
 | 14 - Upstream MCP | PASS (Linux) | A separately supervised standalone Streamable HTTP MCP server was independently probed, then connected as a required Go gateway. A direct authenticated MCP client to the Codexify Go endpoint listed `cutover_gateway` among 29 tools and successfully called its `echo` function. Go also generated/discovered the gateway skill. A new ChatGPT conversation after connector Refresh exposed `cutover_gateway` in the model-visible tool surface and successfully called `echo`, confirming end-to-end upstream MCP operation through Codexify Go on Linux. Windows and macOS remain separately unverified. |
@@ -137,12 +137,8 @@ Do not commit the snapshot, tunnel credential, connector token, or machine-speci
 
 ## Next gates
 
-1. Refresh/reconnect the connector and rerun long-running exec/stdin/cancellation with the Go schema.
-2. Test Go service crash recovery.
-3. Test native Go binding persistence across Go service restart.
-4. Re-evaluate the missing/stale tool-surface differences after connector schema refresh.
-5. Exercise multi-project and managed worktree create/switch/resume.
-6. Exercise real plugin skills, upstream MCP, and attachment ingress/egress.
-7. Exercise self-update.
-8. Reboot with Rust still inactive and verify automatic Go recovery.
-9. Continue several normal sessions with Rust unavailable before declaring v1.0 replacement.
+1. Perform explicit connector disconnect/reconnect and verify old/new conversation behavior.
+2. Exercise simultaneous independent conversation bindings to multiple projects and create/switch/resume managed worktrees through the interactive project-switch flow.
+3. Exercise a real self-update apply when a release newer than the installed build exists; the current `0.8.2-dev` build is ahead of latest published `0.8.1`.
+4. Reboot with Rust still inactive and verify automatic Go service/tunnel recovery plus binding persistence.
+5. Continue several normal sessions with Rust unavailable before declaring Linux replacement complete.
