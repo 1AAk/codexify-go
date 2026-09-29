@@ -95,7 +95,7 @@ After the user refreshed the connector tools, the Go schema loaded correctly and
 
 ### CUTOVER-004 - Required upstream failure can cause an unbounded service restart loop
 
-**Status:** FIXED IN SOURCE / live installed-service acceptance pending next install/update.
+**Status:** FIXED AND LIVE-VERIFIED (Linux).
 
 Two deliberately required upstream configurations were unavailable during startup. Go correctly failed startup because the upstream was marked required, but `Restart=on-failure` then retried indefinitely. The observed restart counter exceeded 100 attempts.
 
@@ -107,7 +107,7 @@ The first real Linux cold-boot attempt reproduced this defect under realistic st
 
 The same boot also revealed that the preserved Rust `codexify.service` was still enabled and therefore started automatically after reboot. It was stopped and disabled again; the Go cutover service remains enabled. A second reboot is required for a clean Go-only cold-boot acceptance run.
 
-The Linux service unit renderer was subsequently hardened without weakening `required` upstream semantics. Managed units now set `StartLimitIntervalSec=60s` and `StartLimitBurst=5` while retaining `Restart=on-failure` and `RestartSec=5s`. An unavailable required upstream therefore still makes startup fail, but systemd rate-limits repeated failures instead of restarting indefinitely. The regression test was observed failing before the change, then the focused service tests, full `go test ./...`, and `go build ./cmd/codexify-go` passed. The currently installed cutover binary/unit predates this source fix; live service acceptance belongs to the next install/self-update cycle.
+The Linux service unit renderer was subsequently hardened without weakening `required` upstream semantics. Managed units now set `StartLimitIntervalSec=60s` and `StartLimitBurst=5` while retaining `Restart=on-failure` and `RestartSec=5s`. An unavailable required upstream therefore still makes startup fail, but systemd rate-limits repeated failures instead of restarting indefinitely. The regression test was observed failing before the change, then the focused service tests, full `go test ./...`, and `go build ./cmd/codexify-go` passed. The fixed build was installed into the live Go-only cutover service and the connector recovered with the same exact managed worktree and `NRestarts=0`. A separate temporary systemd probe using the same start-limit policy failed repeatedly and stopped at `NRestarts=5` with `Start request repeated too quickly`, confirming the installed Linux systemd policy prevents an unbounded restart loop without disrupting the live connector.
 
 ### CUTOVER-005 - Existing conversation retained a stale gateway tool snapshot
 
