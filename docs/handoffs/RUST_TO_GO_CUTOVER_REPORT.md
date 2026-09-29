@@ -16,6 +16,8 @@
 
 Cutover is **in progress**. Platform parity is not being reimplemented during this run unless a cutover test exposes a concrete defect.
 
+This report records the **Linux cutover only**. A PASS in this report means the behavior has been verified on the Ubuntu/Linux host described above; it must not be interpreted as equivalent Rust -> Go replacement evidence for Windows or macOS. Windows and macOS require their own platform-specific cutover and acceptance runs before cross-platform replacement can be declared complete.
+
 The real connector is currently served by Codexify Go. The Rust user service is stopped. This conversation continued through the transport switch and successfully executed Go MCP calls after the Rust service became inactive.
 
 ## Phase status
@@ -36,7 +38,7 @@ The real connector is currently served by Codexify Go. The Rust user service is 
 | 11 - Self-update | PENDING | |
 | 12 - Bindings/state | PARTIAL | Cross-implementation Rust -> Go binding migration was absent at initial cutover, but after rebinding, the native Go conversation/project binding survived a Go service crash/restart. Reboot persistence remains. |
 | 13 - Plugin skills | PASS | Go discovered the installed plugin registry and successfully read a real plugin skill. With the gateway enabled it also generated and discovered the `cutover_gateway` skill. |
-| 14 - Upstream MCP | FAIL / CONNECTOR DEFECT | A separately supervised standalone Streamable HTTP MCP server was independently probed, then connected as a required Go gateway. A direct authenticated MCP client to the Codexify Go endpoint listed `cutover_gateway` among 29 tools and successfully called its `echo` function. Go also generated/discovered the gateway skill. After an explicit ChatGPT connector Refresh, however, the gateway tool is still absent from ChatGPT's exposed connector tool surface. |
+| 14 - Upstream MCP | PASS (Linux) | A separately supervised standalone Streamable HTTP MCP server was independently probed, then connected as a required Go gateway. A direct authenticated MCP client to the Codexify Go endpoint listed `cutover_gateway` among 29 tools and successfully called its `echo` function. Go also generated/discovered the gateway skill. A new ChatGPT conversation after connector Refresh exposed `cutover_gateway` in the model-visible tool surface and successfully called `echo`, confirming end-to-end upstream MCP operation through Codexify Go on Linux. Windows and macOS remain separately unverified. |
 | 15 - Attachments | PASS | Real egress succeeded through `export_host_file`; the resulting native OpenAI file was then imported back through `import_host_file`. The imported 36-byte file retained the same SHA-256 and content. |
 | 16 - Rust dependency elimination | PARTIAL | Rust service is currently inactive and the active Go service owns its own binary, config, credential copy, and managed tunnel runtime. Rust files remain available only for rollback. Reboot and representative workflow suite remain. |
 
@@ -99,9 +101,9 @@ The first upstream, ChatGPT's bundled `node_repl`, was not a valid standalone te
 
 The corrected gateway test runs the standalone MCP server under a separate systemd user transient service. It was independently probed successfully before Codexify Go was restarted, and Codexify Go then connected to it successfully.
 
-### CUTOVER-005 - Dynamically registered gateway tool is not exposed after connector refresh
+### CUTOVER-005 - Existing conversation retained a stale gateway tool snapshot
 
-**Severity:** P1 replacement blocker for upstream MCP parity.
+**Status:** RESOLVED / client conversation snapshot limitation.
 
 With a valid independently supervised Streamable HTTP upstream, Codexify Go starts successfully, connects the required upstream, and generates the `cutover_gateway` skill. Skill discovery increases from 38 to 39 entries and `skills_read` returns the generated gateway contract.
 
@@ -113,7 +115,11 @@ A direct authenticated MCP probe against the running Codexify Go endpoint confir
 
 The same direct tool list contains three intentional app/private tools that are also absent from the model-visible ChatGPT surface. Excluding those expected private tools, `cutover_gateway` is the only server-side tool missing from the current conversation's model-visible tool list.
 
-Before changing Go code, this must be retested in a **new ChatGPT conversation after connector Refresh**. The current conversation existed before the gateway was added, so a conversation-scoped tool snapshot remains a plausible explanation even though connector Refresh was performed. If a new conversation exposes and calls `cutover_gateway`, CUTOVER-005 is a current-conversation schema snapshot limitation rather than a Go publication bug.
+The required retest was completed in a **new ChatGPT conversation after connector Refresh**. The new conversation exposed `cutover_gateway`, discovered/read its generated skill, and successfully invoked `echo` with the response `gateway works through codexify-go` while continuing through the Go connector. Rust was not started for this retest.
+
+This confirms that the earlier missing gateway tool was caused by the existing conversation retaining a stale tool/schema snapshot. Dynamic gateway publication and invocation work through Codexify Go for a newly established conversation, so no Go code change is required for CUTOVER-005.
+
+This resolution is **Linux-specific evidence**. The equivalent upstream MCP gateway publication/invocation flow still requires independent verification on Windows and macOS.
 
 ## Recovery evidence
 
